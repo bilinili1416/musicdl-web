@@ -1,0 +1,9 @@
+**
+!Dockerfile
+!requirements.txt
+!server.py
+!lyrics.py
+!web/
+!web/**
+!deploy/
+!deploy/entrypoint.sh

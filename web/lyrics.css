@@ -1,0 +1,41 @@
+.lyrics-toggle-label{font-size:15px;font-weight:700;color:var(--purple)}
+.player audio{min-width:0}
+.lyrics-panel{position:fixed;z-index:40;right:43px;bottom:112px;width:min(600px,calc(100vw - 300px));max-height:calc(100dvh - 150px);display:flex;flex-direction:column;background:#fff;border:1px solid #e4dcf5;border-radius:20px;box-shadow:0 20px 85px #4c316b30;overflow:hidden}
+.lyrics-heading{padding:24px 25px 15px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;background:linear-gradient(120deg,#faf8ff,#f1ebfc)}
+.lyrics-heading>div{min-width:0}
+.lyrics-heading h2{font-size:20px;line-height:1.45;margin:8px 0 5px;overflow-wrap:anywhere}
+.lyrics-heading p{margin:0;font-size:12px;color:#8d809f;overflow-wrap:anywhere}
+.lyrics-toolbar{display:flex;align-items:center;gap:13px;flex-wrap:wrap;padding:12px 25px;border-bottom:1px solid var(--line)}
+.lyrics-toolbar>span{font-size:10px;color:#a091b0;flex:1;min-width:130px}
+.lyrics-toolbar .text-button{font-size:11px;white-space:nowrap}
+.lyrics-scroll{height:345px;min-height:100px;overflow-y:auto;overscroll-behavior:contain;position:relative;scrollbar-width:thin;scrollbar-color:#dcd1ee transparent;background:radial-gradient(ellipse at 50% 40%,#faf7ff,white 75%);flex:1}
+#lyricsLines{padding:70px 25px 110px}
+.lyric-line{display:flex;flex-direction:column;gap:7px;width:100%;text-align:center;padding:14px 10px;line-height:1.65;color:#ada5b9;border-radius:10px;transition:color .2s,background .2s;overflow-wrap:anywhere}
+.lyric-line:hover{background:#eee7fb7a;color:#79608f}
+.lyric-original{font-size:18px;font-weight:500;white-space:pre-line}
+.lyric-translation{font-size:13px;color:#b6a9c4;white-space:pre-line}
+.lyric-line.active{color:var(--purple-dark);background:#eee7fb70}
+.lyric-line.active .lyric-original{font-weight:750;font-size:21px}
+.lyric-line.active .lyric-translation{color:#87709d}
+.lyric-gap{letter-spacing:6px}
+.lyric-plain{font-size:17px;line-height:2.1;text-align:center;white-space:pre-wrap;overflow-wrap:anywhere;color:#6d5e7c}
+.lyric-plain.translated{font-size:14px;color:#9a89aa;margin-top:25px}
+.lyrics-footer{display:flex;align-items:center;gap:7px;font-size:10px;color:#a395b0;padding:13px 22px;border-top:1px solid var(--line);flex-wrap:wrap;background:#fcfaff}
+.lyrics-footer label{color:#867598}
+.lyrics-footer input{width:58px;border:1px solid #e8e0f2;border-radius:5px;background:white;color:#77618f;font-size:11px;padding:5px}
+.lyrics-footer button{margin-left:auto;font-size:10px}
+.lyrics-loading{padding:40px 20px;display:flex;justify-content:center;gap:10px;color:#a393b1;font-size:12px}
+.lyric-note,.plain-translation{font-size:11px;line-height:1.8;color:#a392b1;text-align:center;margin-top:25px}
+.plain-translation p{white-space:pre-line}
+.lyrics-search-form{display:flex;gap:9px;margin:20px 0 12px}
+.lyrics-search-form input{min-width:0;flex:1;border:1px solid #e7e0ef;border-radius:8px;padding:10px 12px;font-size:12px}
+.lyric-candidate{display:flex;align-items:center;justify-content:space-between;gap:14px;width:100%;text-align:left;padding:14px 8px;border-bottom:1px solid var(--line)}
+.lyric-candidate:hover{background:#f7f2ff}
+.lyric-candidate>span:first-child{min-width:0}
+.lyric-candidate strong{font-size:12px;display:block;overflow-wrap:anywhere}
+.lyric-candidate small{font-size:10px;color:#a192af;display:block;margin-top:5px;overflow-wrap:anywhere}
+.lyric-candidate>span:last-child{display:flex;align-items:center;gap:8px;font-size:10px;color:#b1a2bf;white-space:nowrap}
+#lyricsCandidates{max-height:300px;overflow:auto}
+@media(max-width:1150px){.lyrics-panel{right:28px;width:min(580px,calc(100vw - 256px))}}
+@media(max-width:680px){.lyrics-panel{left:12px;right:12px;bottom:155px;width:auto;max-height:calc(100dvh - 185px);border-radius:16px}.lyrics-heading{padding:19px 18px 13px}.lyrics-heading h2{font-size:17px;max-height:75px;overflow:auto}.lyrics-toolbar{padding:10px 17px;gap:12px}.lyrics-toolbar>span{flex-basis:100%}.lyrics-scroll{height:290px}#lyricsLines{padding:55px 14px 100px}.lyric-original{font-size:16px}.lyric-line.active .lyric-original{font-size:18px}.lyric-translation{font-size:12px}.lyrics-footer{padding:10px 15px;font-size:9px}.player #toggleLyrics{position:absolute;right:43px;top:15px}.player-info{padding-right:50px}.lyrics-footer button{font-size:9px}}
+@media(prefers-reduced-motion:reduce){.lyric-line{transition:none}}

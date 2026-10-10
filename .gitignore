@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+musicdl_outputs/
+.musicdl-web/
+*.log
+.env
+.env.*
+!.env.example
+deploy-source.zip
+.deploy-tools/
+.deploy-upload/
+deploy/access.txt
+deploy/LOCAL-DEPLOY.md
+preview*.jpg
+lyrics-preview.jpg
