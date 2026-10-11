@@ -38,7 +38,7 @@ class WebIntegrationTests(unittest.TestCase):
         cls.output.mkdir()
         cls.patches = [patch.object(server, "OUTPUT", cls.output),
                        patch.object(server, "STATE", Path(cls.temp.name) / "state"),
-                       patch.object(server, "JOBS", {}), patch.object(server, "CACHE", {}),
+                       patch.object(server, "JOBS", {}), patch.object(server, "IMPORTS", {}), patch.object(server, "CACHE", {}),
                        patch.object(server, "SEARCHES", {}), patch.object(server, "AUTH_PASSWORD", ""),
                        patch.object(server, "PUBLIC_ORIGIN", "")]
         for p in cls.patches:
@@ -79,7 +79,7 @@ class WebIntegrationTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(json.loads(body)["ready"])
         self.assertEqual(len(json.loads(body)["sources"]), 6)
-        for path in ["/", "/styles.css", "/lyrics.css", "/app.js", "/memory.js", "/favicon.svg"]:
+        for path in ["/", "/styles.css", "/lyrics.css", "/app.js", "/memory.js", "/queue.js", "/favicon.svg"]:
             self.assertEqual(self.request(path)[0], 200)
         self.assertEqual(self.request("/server.py")[0], 404)
         self.assertEqual(self.request("/../server.py")[0], 404)
@@ -89,6 +89,7 @@ class WebIntegrationTests(unittest.TestCase):
         self.assertEqual(self.request("/api/search", {"keyword": "test", "sources": ["InvalidClient"]})[0], 400)
         self.assertEqual(self.request("/api/search", {"keyword": "test", "sources": []})[0], 400)
         self.assertEqual(self.request("/api/search", {"keyword": "test", "limit": 31})[0], 400)
+        self.assertEqual(self.request("/api/search", {"keyword": "test", "mode": "invalid"})[0], 400)
         self.assertEqual(self.request("/api/downloads", {"ids": ["expired"]})[0], 400)
         self.assertEqual(self.request("/api/downloads", {"ids": []})[0], 400)
         self.assertEqual(self.request("/api/downloads", {"ids": [["bad"]]})[0], 400)
@@ -187,6 +188,95 @@ class WebIntegrationTests(unittest.TestCase):
         self.assertEqual(self.request(f'/api/files/{job["fileId"]}', headers={"Range": "bytes=999999999-"})[0], 416)
         self.assertIn("filename*=UTF-8", self.request(f'/api/files/{job["fileId"]}?download=1')[1]["Content-Disposition"])
         self.assertEqual(self.request('/api/files/nonexistent')[0], 404)
+
+    def test_fast_search_deferred_download_and_private_record(self):
+        raw = {'MUSICRID': 'MUSIC_test', 'SONGNAME': '本地测试', 'ARTIST': '测试歌手'}
+        descriptor = server.fastsearch.metadata('KuwoMusicClient', raw)
+        calls = []
+        def fake_source(source, keyword, limit, mode):
+            calls.append(mode)
+            return [descriptor], None
+        with patch.object(server, 'search_source', fake_source):
+            code, _, body = self.request('/api/search', {'keyword': 'test', 'sources': ['KuwoMusicClient'], 'mode': 'fast'})
+            self.assertEqual(code, 202)
+            sid = json.loads(body)['id']
+            for _ in range(100):
+                result = json.loads(self.request(f'/api/search/{sid}')[2])
+                if result['status'] == 'completed':
+                    break
+                time.sleep(.02)
+        self.assertEqual(calls, ['fast'])
+        view = result['songs'][0]
+        self.assertTrue(view['needsResolve'])
+        self.assertNotIn('raw', view)
+        self.assertNotIn('download_url', view)
+        song = synthetic_song()
+        def resolve(selected):
+            self.assertEqual(selected['raw'], raw)
+            self.assertEqual(next(iter(server.JOBS.values()))['status'], 'resolving')
+            return song
+        with patch.object(server, 'resolve_source', side_effect=resolve):
+            code, _, body = self.request('/api/downloads', {'ids': [view['id']]})
+            self.assertEqual(code, 202)
+            job = server.JOBS[json.loads(body)['ids'][0]]
+            for _ in range(200):
+                if job['status'] in {'completed', 'failed'}:
+                    break
+                time.sleep(.05)
+        self.assertEqual(job['status'], 'completed', job.get('error'))
+        self.assertEqual(job['song']['format'], 'WAV')
+        self.assertNotIn('needsResolve', job['song'])
+
+    def test_special_titles_download_in_sequence_and_parallel_with_gbk_output(self):
+        import rich
+        from rich.console import Console
+        from rich.segment import Segment
+
+        # Simulate a redirected Windows console, including the stale progress text
+        # that used to make even ordinary subsequent song names fail.
+        with io.TextIOWrapper(io.BytesIO(), encoding='gbk', errors='strict') as output:
+            console = Console(file=output)
+            console._buffer.append(Segment('M♭ (Preparing)'))
+            before = list(console._buffer)
+            with patch('sys.stdout', output), patch.object(rich, '_console', console):
+                for parallel in (False, True):
+                    tasks = []
+                    for index, title in enumerate(('M♭', '桜色ダイアリー', 'normal', '🎵 music')):
+                        song = synthetic_song()
+                        song.source, song.song_name = 'NeteaseMusicClient', title
+                        jid = f'gbk-{parallel}-{index}'
+                        server.JOBS[jid] = {'id': jid, 'status': 'queued', 'song': server.song_view(song, jid)}
+                        tasks.append((jid, song))
+                    if parallel:
+                        with server.ThreadPoolExecutor(max_workers=2) as pool:
+                            futures = [pool.submit(server.download_task, jid, song) for jid, song in tasks]
+                            for future in futures:
+                                future.result()
+                    else:
+                        for jid, song in tasks:
+                            server.download_task(jid, song)
+                    for jid, song in tasks:
+                        job = server.JOBS[jid]
+                        self.assertEqual(job['status'], 'completed', job.get('error'))
+                        path = server.find_file(job['fileId'])
+                        self.assertIsNotNone(path)
+                        self.assertEqual(path.read_bytes()[:4], b'RIFF')
+                        self.assertIn(song.song_name, job['fileName'])
+                self.assertEqual(console._buffer, before)
+
+    def test_failed_fast_resolution_and_restart_recovery(self):
+        descriptor = server.fastsearch.metadata('KuwoMusicClient', {'MUSICRID': 'MUSIC_123', 'SONGNAME': '歌曲'})
+        jid = 'resolution-failure'
+        server.JOBS[jid] = {'id': jid, 'status': 'queued', 'song': server.song_view(descriptor, jid)}
+        with patch.object(server, 'resolve_source', side_effect=ValueError('暂不可下载')):
+            server.download_task(jid, descriptor)
+        self.assertEqual(server.JOBS[jid]['status'], 'failed')
+        self.assertNotIn('fileId', server.JOBS[jid])
+        server.JOBS[jid]['status'] = 'resolving'
+        server.persist_jobs()
+        with patch.object(server, 'JOBS', {}):
+            server.load_jobs()
+            self.assertEqual(server.JOBS[jid]['status'], 'failed')
 
     def test_download_failure_and_restart_recovery(self):
         from types import SimpleNamespace

@@ -22,9 +22,12 @@ const memory = MusicdlMemory;
 const state = {
   view:'discover', sources:sourceDefaults, selectedSources:new Set(Array.isArray(savedPrefs.sources) ? savedPrefs.sources.filter(s => sourceDefaults.some(p => p.id === s)) : sourceDefaults.slice(0,3).map(s=>s.id)),
   limit:[5,12,20,30].includes(savedPrefs.limit) ? savedPrefs.limit : 12,
+  searchMode:savedPrefs.searchMode==='full'?'full':'fast', resultMode:'fast',
   songs:[], selected:new Set(), favorites:Array.isArray(storedFavorites) ? storedFavorites.filter(s=>s && typeof s.title==='string').slice(0,500) : [],
   jobs:[], library:[], keyword:'', searching:false, hasSearched:false, downloadTab:'all', ready:false,
   jobsSignature:'', seenJobs:new Map(), downloadsLoaded:false, queuing:false,
+  selectedHistory:new Set(), selectedMusic:new Set(), deletingHistory:false, deletingMusic:false,
+  pendingMusicDelete:[], dataRevision:0,
   playingFile:null, lyrics:[], lyricsIndex:-1, lyricRequest:0, importKind:'original', lyricScrollUntil:0,
   lyricOffsets:readStorage('musicdl.lyricOffsets', {}), lyricCache:new Map(),
   searchHistory:memory.history(readStorage('musicdl.searchHistory', [])),
@@ -35,6 +38,9 @@ const state = {
   studyTranslation:readStorage('musicdl.studyTranslation',true) === true,
   studyFont:[16,19,22].includes(readStorage('musicdl.studyFont',19))?readStorage('musicdl.studyFont',19):19,
   studyReturnView:'discover', studyPending:false,
+  playlists:[], playlistId:savedPrefs.playlistId||'all', queuePlaylist:savedPrefs.queuePlaylist||'all', queue:null,
+  playMode:['sequence','shuffle','loop'].includes(savedPrefs.playMode)?savedPrefs.playMode:'sequence', advancing:false,
+  imports:[], importsPolling:false, uploading:false, importSignature:'', seenImports:new Set(readStorage('musicdl.seenImports',[])),
 };
 if (!state.selectedSources.size) state.selectedSources.add(sourceDefaults[0].id);
 
@@ -46,7 +52,7 @@ function toast(message, error=false) {
   setTimeout(()=>node.remove(), 4800);
 }
 function savePreferences() {
-  try { localStorage.setItem('musicdl.preferences', JSON.stringify({limit:state.limit,sources:[...state.selectedSources]})); }
+  try { localStorage.setItem('musicdl.preferences', JSON.stringify({limit:state.limit,sources:[...state.selectedSources],searchMode:state.searchMode,playlistId:state.playlistId,queuePlaylist:state.queuePlaylist,playMode:state.playMode})); }
   catch { toast('浏览器无法保存偏好，本次设置仍然有效',true); }
 }
 function favoriteKey(song) { return [song.title,song.artist,song.source,song.format].join('\u0000'); }
@@ -76,7 +82,7 @@ async function api(path, body, timeout=15000) {
     throw error;
   } finally { clearTimeout(timer); }
 }
-function sourceInfo(id) { return state.sources.find(s=>s.id===id) || {name:id?.replace('MusicClient','') || '本地音乐',color:'#957ab7'}; }
+function sourceInfo(id) { return state.sources.find(s=>s.id===id) || {name:id==='LocalImport'?'本地导入':id?.replace('MusicClient','') || '本地音乐',color:'#957ab7'}; }
 function setSidebar(open) {
   const narrow=window.matchMedia('(max-width:680px)').matches;
   $('#sidebar').classList.toggle('open',open);
@@ -136,7 +142,7 @@ function renderResults() {
   if(!state.hasSearched) return;
   const songs=visibleSongs();
   $('#resultsTitle').textContent=`“${state.keyword}” 的搜索结果`;
-  $('#resultsSubtitle').textContent=`找到 ${state.songs.length} 首歌曲 · 当前显示 ${songs.length} 首 · 音质以平台返回为准`;
+  $('#resultsSubtitle').textContent=`找到 ${state.songs.length} 首歌曲 · 当前显示 ${songs.length} 首 · ${state.resultMode==='fast'?'快速搜索：下载时解析音质和链接，部分歌曲可能不可下载':'完整搜索：音质以平台返回为准'}`;
   if(!songs.length) {
     $('#resultsTable').innerHTML=empty('search',state.searching?'正在寻找喜欢的声音…':state.songs.length?'没有符合筛选条件的歌曲':'暂时没有找到歌曲',state.searching?'各平台的结果会陆续显示，请稍候。':state.songs.length?'尝试选择其他平台或音质。':'试试更简短的关键词，或切换其他音乐平台。');
   } else {
@@ -166,8 +172,12 @@ async function search(keyword) {
   setView('discover');
   $('#searchInput').value=keyword;
   state.keyword=keyword; state.searching=true; state.hasSearched=true;
+  state.resultMode=state.searchMode;
   state.songs=[]; state.selected.clear();
   $('#formatFilter').value='all'; $('#sortSelect').value='default';
+  $('#formatFilter').disabled=state.resultMode==='fast';
+  $('#sortSelect option[value="size"]').disabled=state.resultMode==='fast';
+  $('#searchMode').disabled=true;
   $('#sourceFilter').innerHTML='<option value="all">所有平台</option>';
   $('#discoveryContent').hidden=true; $('#resultsSection').hidden=false; $('#searchStatus').hidden=false;
   $('#searchButton').disabled=true;
@@ -175,7 +185,7 @@ async function search(keyword) {
   $('#searchStatus').innerHTML='<span class="spinner"></span>正在连接音乐平台，结果会陆续显示…';
   renderResults();
   try {
-    const {id}=await api('/api/search',{keyword,sources:[...state.selectedSources],limit:state.limit});
+    const {id}=await api('/api/search',{keyword,sources:[...state.selectedSources],limit:state.limit,mode:state.resultMode});
     saveSearch(keyword);
     const started=Date.now();
     while(true) {
@@ -202,6 +212,7 @@ async function search(keyword) {
   } finally {
     state.searching=false;
     $('#searchButton').disabled=false;
+    $('#searchMode').disabled=false;
     $('#searchButton').innerHTML=`搜索音乐${icon('arrow')}`;
   }
 }
@@ -217,28 +228,55 @@ async function queueDownloads(ids) {
   finally { state.queuing=false; updateBatchButton(); }
 }
 function jobStatus(job) {
-  const labels={queued:'等待下载',downloading:'正在下载',completed:'下载完成',failed:'下载失败'};
-  return `<div class="job-status ${esc(job.status)}">${job.status==='downloading'?'<span class="spinner"></span>':job.status==='completed'?icon('check'):''}<span>${labels[job.status]||esc(job.status)}</span>${job.error?`<span class="job-error" title="${esc(job.error)}">${esc(job.error)}</span>`:''}</div>`;
+  const labels={queued:'等待下载',resolving:'正在解析音质与链接',downloading:'正在下载',completed:'下载完成',failed:'下载失败'};
+  return `<div class="job-status ${esc(job.status)}">${['resolving','downloading'].includes(job.status)?'<span class="spinner"></span>':job.status==='completed'?icon('check'):''}<span>${labels[job.status]||esc(job.status)}</span>${job.error?`<span class="job-error" title="${esc(job.error)}">${esc(job.error)}</span>`:''}</div>`;
 }
 function fileActions(song) {
   return `<div class="row-actions"><button class="icon-button" data-play="${esc(song.fileId)}" title="播放" aria-label="播放 ${esc(song.title)}">${icon('play')}</button><button class="icon-button" data-study="${esc(song.fileId)}" title="歌词鉴赏" aria-label="鉴赏 ${esc(song.title)}">${icon('book')}</button><a class="icon-button" href="/api/files/${encodeURIComponent(song.fileId)}?download=1" title="保存文件" aria-label="保存 ${esc(song.title)}">${icon('download')}</a></div>`;
 }
-function downloadRow(job,index=0) {
+function downloadRow(job,index=0,selectable=false) {
   const s=job.song;
-  return `<div class="download-row">${trackArt(index)}<span class="track-text">${songTitle(s)}<small>${esc(s.artist)} · ${esc(sourceInfo(s.source).name)} · ${esc(s.format)}</small></span>${jobStatus(job)}${job.status==='completed'&&job.fileId?fileActions({...s,fileId:job.fileId}):job.status==='failed'?`<button class="secondary" data-research="${esc(s.title+' '+s.artist)}">重新搜索</button>`:''}</div>`;
+  return `<div class="download-row">${selectable?`<input type="checkbox" data-select-history="${esc(job.id)}" aria-label="选择下载记录 ${esc(s.title)}" ${state.selectedHistory.has(job.id)?'checked':''} ${!finishedJob(job)||state.deletingHistory?'disabled':''}>`:''}${trackArt(index)}<span class="track-text">${songTitle(s)}<small>${esc(s.artist)} · ${esc(sourceInfo(s.source).name)} · ${esc(s.format)}</small></span>${jobStatus(job)}${job.status==='completed'&&job.fileId?fileActions({...s,fileId:job.fileId}):job.status==='failed'?`<button class="secondary" data-research="${esc(s.title+' '+s.artist)}">重新搜索</button>`:''}</div>`;
+}
+const finishedJob = job => ['completed','failed'].includes(job.status);
+function visibleDownloadJobs() {
+  return state.jobs.filter(j=>state.downloadTab==='all'||(state.downloadTab==='active'?['queued','resolving','downloading'].includes(j.status):j.status===state.downloadTab));
+}
+function updateBulkSelection() {
+  const historyIds=new Set(state.jobs.filter(finishedJob).map(j=>j.id));
+  for(const id of state.selectedHistory)if(!historyIds.has(id))state.selectedHistory.delete(id);
+  const history=visibleDownloadJobs().filter(finishedJob),music=playlistFiles(state.playlistId);
+  for(const id of state.selectedMusic)if(!music.includes(id))state.selectedMusic.delete(id);
+  for(const [selector,ids,selected,busy] of [
+    ['#selectAllHistory',history.map(j=>j.id),state.selectedHistory,state.deletingHistory],
+    ['#selectAllMusic',music,state.selectedMusic,state.deletingMusic]]) {
+    const checkbox=$(selector),count=ids.filter(id=>selected.has(id)).length;
+    checkbox.checked=ids.length>0&&count===ids.length;checkbox.indeterminate=count>0&&count<ids.length;
+    checkbox.disabled=!ids.length||busy;
+  }
+  $('#historySelectionCount').textContent=`已选 ${state.selectedHistory.size} 条`;
+  $('#musicSelectionCount').textContent=`已选 ${state.selectedMusic.size} 首`;
+  $('#deleteHistory').disabled=!state.selectedHistory.size||state.deletingHistory;
+  $('#deleteMusic').disabled=!state.selectedMusic.size||state.deletingMusic;
+  $('#clearHistorySelection').disabled=!state.selectedHistory.size||state.deletingHistory;
+  $('#clearMusicSelection').disabled=!state.selectedMusic.size||state.deletingMusic;
 }
 function renderDownloads() {
-  const active=state.jobs.filter(j=>['queued','downloading'].includes(j.status)).length;
+  const active=state.jobs.filter(j=>['queued','resolving','downloading'].includes(j.status)).length;
   $('#downloadCount').textContent=active;
   $('#downloadStats').innerHTML=[['进行中',active,'download'],['已完成',state.jobs.filter(j=>j.status==='completed').length,'check'],['未完成',state.jobs.filter(j=>j.status==='failed').length,'help']].map(([label,num,i])=>`<div class="stat-card"><span><small>${label}</small><strong>${num}</strong></span>${icon(i)}</div>`).join('');
-  const filtered=state.jobs.filter(j=>state.downloadTab==='all'||(state.downloadTab==='active'?['queued','downloading'].includes(j.status):j.status===state.downloadTab));
-  $('#downloadList').innerHTML=filtered.length?filtered.map(downloadRow).join(''):empty('download','还没有下载任务',state.downloadTab==='all'?'去发现音乐，搜索并收藏你喜欢的声音。':'当前分类中没有下载任务。',state.downloadTab==='all'?`<button class="primary" data-view="discover">去发现音乐${icon('arrow')}</button>`:'');
+  updateBulkSelection();
+  const filtered=visibleDownloadJobs();
+  $('#downloadList').innerHTML=filtered.length?filtered.map((j,i)=>downloadRow(j,i,true)).join(''):empty('download','还没有下载任务',state.downloadTab==='all'?'去发现音乐，搜索并收藏你喜欢的声音。':'当前分类中没有下载任务。',state.downloadTab==='all'?`<button class="primary" data-view="discover">去发现音乐${icon('arrow')}</button>`:'');
   const recent=state.jobs.slice(0,3);
-  $('#recentDownloads').innerHTML=recent.length?recent.map(downloadRow).join(''):`<div class="recent-empty"><span class="empty-icon">${icon('download')}</span><div><strong>你的下一首心动，还在路上</strong><p>搜索一首喜欢的歌，让音乐收藏从这里开始。</p></div><button class="text-button" id="focusSearch">开始探索${icon('arrow')}</button></div>`;
+  $('#recentDownloads').innerHTML=recent.length?recent.map((j,i)=>downloadRow(j,i)).join(''):`<div class="recent-empty"><span class="empty-icon">${icon('download')}</span><div><strong>你的下一首心动，还在路上</strong><p>搜索一首喜欢的歌，让音乐收藏从这里开始。</p></div><button class="text-button" id="focusSearch">开始探索${icon('arrow')}</button></div>`;
 }
 async function refreshDownloads(report=false) {
+  if(state.deletingHistory||state.deletingMusic)return;
+  const revision=state.dataRevision;
   try {
     const {jobs}=await api('/api/downloads');
+    if(revision!==state.dataRevision)return;
     const signature=JSON.stringify(jobs);
     if(signature===state.jobsSignature) return;
     let completed=false;
@@ -250,9 +288,10 @@ async function refreshDownloads(report=false) {
       }
       state.seenJobs.set(job.id,job.status);
     }
+    const removed=state.jobs.some(j=>j.fileId&&!jobs.some(n=>n.id===j.id));
     state.downloadsLoaded=true; state.jobs=jobs; state.jobsSignature=signature;
     renderDownloads();
-    if(completed&&state.view==='library') refreshLibrary();
+    if(removed||completed) {await loadLibrary();renderLibrary();}
   } catch(error) { if(report) toast(error.message,true); }
 }
 function renderFavorites() {
@@ -262,13 +301,154 @@ function renderFavorites() {
 async function refreshLibrary() {
   $('#refreshLibrary').disabled=true;
   try {
-    const {songs}=await api('/api/library');
-    state.library=songs;
-    $('#libraryList').innerHTML=songs.length?songs.map((s,i)=>`<div class="download-row">${trackArt(i)}<span class="track-text">${songTitle(s)}<small>${esc(s.artist)} · ${esc(s.format)} · ${esc(s.size)}</small></span>${fileActions(s)}</div>`).join(''):empty('library','音乐收藏，从第一首开始','完成一次下载后，音频文件会出现在这里。',`<button class="primary" data-view="discover">去搜索音乐${icon('arrow')}</button>`);
+    await loadLibrary();renderLibrary();
   } catch(error) {
     $('#libraryList').innerHTML=empty('help','暂时无法读取音乐库',error.message);
     toast(error.message,true);
   } finally { $('#refreshLibrary').disabled=false; }
+}
+async function loadLibrary() {
+  const revision=state.dataRevision;
+  const [{songs},{playlists}]=await Promise.all([api('/api/library'),api('/api/playlists')]);
+  if(revision!==state.dataRevision)return;
+  const available=new Set(songs.map(s=>s.fileId));
+  forgetDeletedMusic(state.library.filter(s=>!available.has(s.fileId)).map(s=>s.fileId));
+  state.library=songs;state.playlists=playlists;
+  if(!playlists.some(p=>p.id===state.playlistId))state.playlistId='all';
+  if(!playlists.some(p=>p.id===state.queuePlaylist))state.queuePlaylist='all';
+  if(state.queue)MusicdlQueue.reconcile(state.queue,playlistFiles(state.queuePlaylist));
+  updateQueue();
+}
+function playlistFiles(pid) {
+  const available=new Set(state.library.map(s=>s.fileId));
+  return (state.playlists.find(p=>p.id===pid)?.files||[]).filter(fid=>available.has(fid));
+}
+function playlistOptions(customOnly=false) {
+  return state.playlists.filter(p=>!customOnly||p.id!=='all').map(p=>`<option value="${esc(p.id)}">${esc(p.name)} (${p.files.length})</option>`).join('');
+}
+function renderLibrary() {
+  $('#playlistSelect').innerHTML=playlistOptions();$('#playlistSelect').value=state.playlistId;
+  $('#renamePlaylist').disabled=$('#deletePlaylist').disabled=state.playlistId==='all';
+  const ids=playlistFiles(state.playlistId),byId=new Map(state.library.map(s=>[s.fileId,s]));
+  const songs=ids.map(fid=>byId.get(fid));$('#playPlaylist').disabled=!songs.length;
+  $('#playlistSummary').textContent=`${songs.length} 首歌曲 · ${state.playlistId==='all'?'自动收录全部下载与导入的音乐':'按加入列表的顺序播放；移出列表会保留音频文件'}`;
+  updateBulkSelection();
+  $('#libraryList').innerHTML=songs.length?songs.map((s,i)=>`<div class="download-row library-row"><input type="checkbox" data-select-music="${esc(s.fileId)}" aria-label="选择本地音乐 ${esc(s.title)}" ${state.selectedMusic.has(s.fileId)?'checked':''} ${state.deletingMusic?'disabled':''}>${trackArt(i)}<span class="track-text">${songTitle(s)}<small>${esc(s.artist)} · ${esc(s.format)} · ${esc(s.size)}</small></span>${fileActions(s)}<div class="playlist-row-actions"><button class="text-button" data-playlist-add="${esc(s.fileId)}" aria-label="把 ${esc(s.title)} 加入列表" title="加入播放列表">＋</button>${state.playlistId!=='all'?`<button class="text-button" data-playlist-remove="${esc(s.fileId)}" aria-label="把 ${esc(s.title)} 移出列表" title="移出列表">−</button>`:''}</div></div>`).join(''):empty('library',state.playlistId==='all'?'音乐收藏，从第一首开始':'这个列表还没有歌曲','可以导入本地音频，或在全部本地音乐中点击歌曲旁的 ＋ 加入列表。');
+}
+
+function forgetDeletedMusic(ids) {
+  if(!ids.length)return;
+  const removed=new Set(ids);
+  if(removed.has(state.playingFile))closePlayer();
+  for(const fid of ids){state.selectedMusic.delete(fid);state.lyricCache.delete(fid);delete state.lyricOffsets[fid];delete state.playback.positions[fid];}
+  if(removed.has(state.playback.lastFile))state.playback.lastFile=null;
+  state.library=state.library.filter(s=>!removed.has(s.fileId));
+  state.jobs=state.jobs.filter(j=>!removed.has(j.fileId));
+  const imports=state.imports.filter(j=>removed.has(j.fileId));
+  for(const job of imports)state.seenImports.delete(job.id);
+  state.imports=state.imports.filter(j=>!removed.has(j.fileId));renderImports();
+  for(const list of state.playlists)list.files=list.files.filter(fid=>!removed.has(fid));
+  if(state.queue){
+    MusicdlQueue.reconcile(state.queue,state.queue.ids.filter(fid=>!removed.has(fid)));
+    state.queue.history=state.queue.history.filter(fid=>!removed.has(fid));
+    state.queue.cursor=state.queue.history.indexOf(state.queue.current);
+    if(removed.has(state.queue.current))state.queue.current=null;
+  }
+  writeStorage('musicdl.playback',state.playback);writeStorage('musicdl.lyricOffsets',state.lyricOffsets);
+  writeStorage('musicdl.seenImports',[...state.seenImports]);updateQueue();
+}
+
+async function deleteSelectedHistory() {
+  if(!state.selectedHistory.size||state.deletingHistory)return;
+  const ids=[...state.selectedHistory];state.deletingHistory=true;++state.dataRevision;renderDownloads();
+  try {
+    const result=await api('/api/downloads/delete',{ids});
+    state.jobs=state.jobs.filter(j=>!ids.includes(j.id));
+    for(const id of ids){state.selectedHistory.delete(id);state.seenJobs.delete(id);}
+    state.jobsSignature='';toast(`已删除 ${result.deleted.length} 条下载历史，本地文件保留`);
+  }catch(error){toast(error.message,true);}
+  finally {state.deletingHistory=false;++state.dataRevision;renderDownloads();await refreshDownloads(true);}
+}
+
+function confirmMusicDeletion() {
+  if(!state.selectedMusic.size||state.deletingMusic)return;
+  const songs=state.library.filter(s=>state.selectedMusic.has(s.fileId));
+  state.pendingMusicDelete=songs.map(s=>s.fileId);
+  $('#musicDeleteMessage').textContent=`确定永久删除这 ${songs.length} 首本地音乐？音频文件及关联歌词会从磁盘删除，对应下载、导入记录和播放列表条目也会移除。此操作无法撤销。`;
+  $('#musicDeleteSongs').innerHTML=songs.slice(0,10).map(s=>`<li><strong>${esc(s.title)}</strong><span>${esc(s.artist)}</span></li>`).join('')+(songs.length>10?`<li>还有 ${songs.length-10} 首歌曲</li>`:'');
+  $('#musicDeleteError').textContent='';$('#musicDeleteDialog').showModal();$('#cancelDeleteMusic').focus();
+}
+
+async function deleteConfirmedMusic() {
+  if(!$('#musicDeleteDialog').open||!state.pendingMusicDelete.length||state.deletingMusic)return;
+  const ids=[...state.pendingMusicDelete];state.deletingMusic=true;++state.dataRevision;
+  $$('#musicDeleteDialog [data-close-dialog]').forEach(button=>button.disabled=true);
+  $('#confirmDeleteMusic').disabled=true;$('#musicDeleteError').textContent='正在删除…';renderLibrary();
+  if(ids.includes(state.playingFile))closePlayer();
+  try {
+    const result=await api('/api/library/delete',{ids,confirmed:true});
+    const removed=[...result.deleted,...result.missing];forgetDeletedMusic(removed);state.jobsSignature='';
+    $('#musicDeleteDialog').close();
+    toast(`已删除 ${result.deleted.length} 首本地音乐${result.missing.length?`，${result.missing.length} 首文件已不存在`:''}`);
+    if(result.errors.length)toast(`${result.errors.length} 首未能删除：${result.errors[0].message}`,true);
+    if(result.warnings.length)toast(result.warnings[0].message,true);
+  }catch(error){$('#musicDeleteError').textContent=error.message;toast(error.message,true);}
+  finally {
+    state.deletingMusic=false;++state.dataRevision;$('#confirmDeleteMusic').disabled=false;
+    $$('#musicDeleteDialog [data-close-dialog]').forEach(button=>button.disabled=false);
+    renderDownloads();await refreshDownloads(true);await refreshLibrary();await refreshImports(true);
+  }
+}
+async function changePlaylist(body) {
+  const result=await api('/api/playlists',body);state.playlists=result.playlists;
+  if(!state.playlists.some(p=>p.id===state.playlistId))state.playlistId='all';
+  if(!state.playlists.some(p=>p.id===state.queuePlaylist))state.queuePlaylist='all';
+  if(state.queue)MusicdlQueue.reconcile(state.queue,playlistFiles(state.queuePlaylist));
+  savePreferences();renderLibrary();updateQueue();return result;
+}
+function updateQueue() {
+  $('#playMode').value=state.playMode;
+  const list=state.playlists.find(p=>p.id===state.queuePlaylist),ids=state.queue?.ids||[];
+  const index=ids.indexOf(state.playingFile);
+  $('#queueName').textContent=list?`${list.name} · ${index<0?'—':index+1} / ${ids.length}`:'';
+  $('#previousTrack').disabled=$('#nextTrack').disabled=!ids.length||state.advancing;
+}
+async function movePlayer(direction=1,ended=false) {
+  if(state.advancing||!state.queue)return;
+  const serial=state.playSerial;state.advancing=true;updateQueue();
+  try {
+    await loadLibrary();if(serial!==state.playSerial)return;
+    const next=MusicdlQueue.move(state.queue,direction);
+    if(next)play(next,{fromQueue:true,startAt:0});
+    else toast(ended?'列表播放完毕':direction<0?'已经是第一首':'已经是最后一首');
+  }catch(error){toast(error.message,true);}
+  finally{state.advancing=false;updateQueue();}
+}
+async function refreshImports(report=false) {
+  if(state.importsPolling)return;state.importsPolling=true;
+  const revision=state.dataRevision;
+  try {
+    const {imports}=await api('/api/imports');const signature=JSON.stringify(imports);
+    if(revision!==state.dataRevision)return;
+    const changed=signature!==state.importSignature;state.importSignature=signature;state.imports=imports;
+    const unseen=imports.slice(0,1000).filter(job=>job.status==='completed'&&!state.seenImports.has(job.id));
+    for(const job of unseen){state.seenImports.add(job.id);state.lyricCache.delete(job.fileId);}
+    if(unseen.length){
+      writeStorage('musicdl.seenImports',[...state.seenImports].slice(-1000));
+      const failed=unseen.filter(job=>job.lyricStatus==='failed');
+      if(failed.length){toast(`${failed.length} 首音乐的歌词未能自动补全：${failed.slice(0,2).map(j=>j.song.title).join('、')}。请查看导入记录，手动找歌词。`,true);$('#importReport').open=true;}
+      if(state.playingFile&&unseen.some(j=>j.fileId===state.playingFile))loadLyrics(state.playingFile);
+    }
+    renderImports();
+    if(changed&&state.view==='library')await refreshLibrary();
+  }catch(error){if(report)toast(error.message,true);}
+  finally{state.importsPolling=false;}
+}
+function renderImports() {
+  const imports=state.imports;
+  $('#importReport').hidden=!imports.length;
+  $('#importReportSummary').textContent=`导入记录 · ${imports.filter(j=>j.status==='checking').length} 首正在检查歌词 · ${imports.filter(j=>j.lyricStatus==='failed').length} 首需手动补全`;
+  $('#importReportItems').innerHTML=imports.slice(0,20).map(job=>`<div class="import-item${job.lyricStatus==='failed'?' import-failed':''}"><div><strong>${esc(job.song.title)}</strong><p>${esc(job.message)}</p></div><button class="text-button" data-import-review="${esc(job.fileId)}">${job.lyricStatus==='failed'?'手动找歌词':'查看歌词'}</button></div>`).join('');
 }
 function savePlayback(force=false) {
   const audio=$('#audioPlayer'),fid=state.playingFile;
@@ -279,24 +459,27 @@ function savePlayback(force=false) {
   state.playback=memory.rememberPlayback(state.playback,fid,audio.currentTime,audio.ended);
   writeStorage('musicdl.playback',state.playback);
 }
-function play(fid,{autoplay=true}={}) {
+function play(fid,{autoplay=true,fromQueue=false,playlistId=state.view==='library'?state.playlistId:'all',startAt=null}={}) {
   const song=state.library.find(s=>s.fileId===fid)||state.jobs.filter(j=>j.fileId===fid).map(j=>({...j.song,fileId:j.fileId}))[0];
   if(!song) return;
+  const lyricsVisible=!$('#lyricsPanel').hidden;
+  if(!fromQueue){state.queuePlaylist=playlistId;state.queue=MusicdlQueue.make(playlistFiles(playlistId),fid,state.playMode);savePreferences();}
   savePlayback(true);
   const audio=$('#audioPlayer'),serial=++state.playSerial;
   audio.pause();
-  state.pendingResume={fid,time:state.playback.positions[fid]?.time || 0,autoplay};
+  state.pendingResume={fid,time:startAt===null?(state.playback.positions[fid]?.time || 0):startAt,autoplay};
   state.playback.lastFile=fid;writeStorage('musicdl.playback',state.playback);
   $('#playerResume').hidden=true;
   $('#playerTitle').textContent=song.title; $('#playerArtist').textContent=song.artist;
   for(const id of ['playerTitle','lyricsTitle']) { $(`#${id}`).dataset.moegirlTitle=song.title;$(`#${id}`).dataset.moegirlArtist=song.artist; }
   $('#player').hidden=false; document.body.classList.add('playing');
   state.playingFile=fid;
+  updateQueue();
   $('#lyricsTitle').textContent=song.title; $('#lyricsArtist').textContent=song.artist;
   const offset=Number(state.lyricOffsets?.[fid]) || 0;
   $('#lyricsOffset').value=Math.max(-30,Math.min(30,offset));
   state.lyricScrollUntil=0;
-  setLyricsVisible(true);
+  setLyricsVisible(fromQueue?lyricsVisible:true);
   loadLyrics(fid);
   audio.src=`/api/files/${encodeURIComponent(fid)}`;
   audio.load();
@@ -319,7 +502,7 @@ async function restorePlayback() {
       state.playback.lastFile=null;writeStorage('musicdl.playback',state.playback);
       toast('上次播放的文件已移走，可在本地音乐中选择其他歌曲');return;
     }
-    play(fid,{autoplay:false});
+    play(fid,{autoplay:false,playlistId:state.queuePlaylist});
   } catch { toast('暂时无法恢复上次播放，记录已保留，可刷新后重试',true); }
 }
 
@@ -411,6 +594,7 @@ async function loadLyrics(fid) {
           data.lookupAttempted=true;state.lyricCache.set(fid,data);renderLyrics(data);
         } else {
           found.lookupAttempted=true;state.lyricCache.set(fid,found);renderLyrics(found);
+          await refreshImports();
         }
       } catch {
         if(request!==state.lyricRequest)return;
@@ -438,11 +622,12 @@ async function searchLyrics() {
   } catch(error) { if(request===state.lyricRequest)$('#lyricsCandidates').textContent=error.message; }
   finally { submit.disabled=false; }
 }
-$('#lookupLyrics').addEventListener('click',()=>{
+function openLyricsLookup(){
   const song=state.library.find(s=>s.fileId===state.playingFile)||state.jobs.find(j=>j.fileId===state.playingFile)?.song;
   $('#lyricsQuery').value=song?`${song.title.split(/[（(]/)[0]} ${song.artist.split(/[,，/&]/)[0]}`:'';
-  $('#lyricsSearchDialog').showModal();searchLyrics();
-});
+  if(!$('#lyricsSearchDialog').open)$('#lyricsSearchDialog').showModal();searchLyrics();
+}
+$('#lookupLyrics').addEventListener('click',openLyricsLookup);
 $('#lyricsSearchForm').addEventListener('submit',event=>{event.preventDefault();searchLyrics();});
 $('#lyricsCandidates').addEventListener('click',async event=>{
   const button=event.target.closest('[data-lyric-song]');if(!button)return;
@@ -453,6 +638,7 @@ $('#lyricsCandidates').addEventListener('click',async event=>{
     if(request!==state.lyricRequest)return;
     state.lyricCache.set(fid,{...data,lookupAttempted:true});renderLyrics(data);$('#lyricsSearchDialog').close();
     toast(data.hasTranslation?'原文与译文已保存':'歌词已保存；该版本暂无译文，可导入翻译 LRC');
+    await refreshImports();
   } catch(error) { if(request===state.lyricRequest)toast(error.message,true); }
   finally { $('#lyricsCandidates').inert=false; }
 });
@@ -473,6 +659,7 @@ $('#lyricsFile').addEventListener('change',async event=>{
     if(request!==state.lyricRequest)return;
     state.lyricCache.set(fid,{...data,lookupAttempted:true});renderLyrics(data);
     toast(data.unmatchedTranslations?'已导入，部分译文时间未对齐，请检查歌词版本':'歌词已导入并保存');
+    await refreshImports();
   } catch(error) { if(request===state.lyricRequest)toast(error.message,true); }
 });
 $('#lyricsLines').addEventListener('click',event=>{
@@ -643,13 +830,29 @@ document.addEventListener('click',event=>{
   if(button.dataset.download) queueDownloads([button.dataset.download]);
   if(button.dataset.favorite) toggleFavorite(state.songs.find(s=>s.id===button.dataset.favorite));
   if(button.dataset.removeFavorite!==undefined) toggleFavorite(state.favorites[Number(button.dataset.removeFavorite)]);
-  if(button.dataset.play) play(button.dataset.play);
+  if(button.dataset.play) play(button.dataset.play,{playlistId:button.closest('#libraryList')?state.playlistId:'all'});
+  if(button.dataset.playlistAdd){
+    if(!state.playlists.some(p=>p.id!=='all')){toast('请先新建一个播放列表');$('#newPlaylist').click();return;}
+    $('#playlistAddDialog').dataset.file=button.dataset.playlistAdd;$('#playlistAddTarget').innerHTML=playlistOptions(true);
+    if(state.playlistId!=='all')$('#playlistAddTarget').value=state.playlistId;$('#playlistAddDialog').showModal();
+  }
+  if(button.dataset.playlistRemove)changePlaylist({action:'remove',id:state.playlistId,files:[button.dataset.playlistRemove]}).then(()=>toast('已移出列表，音频文件保留')).catch(error=>toast(error.message,true));
+  if(button.dataset.importReview){
+    const job=state.imports.find(j=>j.fileId===button.dataset.importReview);
+    play(button.dataset.importReview,{autoplay:false});if(job?.lyricStatus==='failed')openLyricsLookup();
+  }
   if(button.dataset.study)openStudy(button.dataset.study);
   if(button.dataset.studyCopy)copyStudy(button.dataset.studyCopy);
   if(button.hasAttribute('data-close-dialog')) button.closest('dialog').close();
   if(button.id==='focusSearch') { $('#searchInput').focus(); $('#searchInput').scrollIntoView({behavior:'smooth',block:'center'}); }
 });
 $('#searchForm').addEventListener('submit',e=>{e.preventDefault();search($('#searchInput').value);});
+$('#searchMode').value=state.searchMode;
+$('#searchMode').addEventListener('change',()=>{state.searchMode=$('#searchMode').value;savePreferences();updateSearchModeHint();});
+function updateSearchModeHint() {
+  $('#searchModeHint').textContent=state.searchMode==='fast'?'先查歌曲，下载时再确认音质与可用链接。':'搜索时确认音质与下载链接，耗时较长。';
+}
+updateSearchModeHint();
 $('#toggleSources').addEventListener('click',()=>{
   state.selectedSources=new Set((state.selectedSources.size===state.sources.length?state.sources.slice(0,3):state.sources).map(s=>s.id));
   savePreferences(); renderSources();
@@ -671,20 +874,98 @@ $('#resultsTable').addEventListener('change',event=>{
 $('#batchDownload').addEventListener('click',()=>queueDownloads([...state.selected]));
 $('#refreshDownloads').addEventListener('click',async()=>{ $('#refreshDownloads').disabled=true; await refreshDownloads(true); $('#refreshDownloads').disabled=false; });
 $('#refreshLibrary').addEventListener('click',refreshLibrary);
+$('#playlistSelect').addEventListener('change',()=>{state.playlistId=$('#playlistSelect').value;state.selectedMusic.clear();savePreferences();renderLibrary();});
+function editPlaylistDialog(action){
+  $('#playlistDialog').dataset.action=action;$('#playlistDialog').dataset.id=state.playlistId;
+  $('#playlistDialogTitle').textContent=action==='create'?'新建播放列表':'重命名播放列表';
+  $('#playlistName').value=action==='create'?'':state.playlists.find(p=>p.id===state.playlistId)?.name||'';
+  $('#playlistDialog').showModal();$('#playlistName').focus();
+}
+$('#newPlaylist').addEventListener('click',()=>editPlaylistDialog('create'));
+$('#renamePlaylist').addEventListener('click',()=>editPlaylistDialog('rename'));
+$('#playlistForm').addEventListener('submit',async event=>{
+  event.preventDefault();const button=$('#playlistForm button');button.disabled=true;
+  try{
+    const {id}=await changePlaylist({action:$('#playlistDialog').dataset.action,id:$('#playlistDialog').dataset.id,name:$('#playlistName').value});
+    state.playlistId=id;savePreferences();renderLibrary();$('#playlistDialog').close();toast('播放列表已保存');
+  }catch(error){toast(error.message,true);}finally{button.disabled=false;}
+});
+$('#deletePlaylist').addEventListener('click',()=>{
+  $('#playlistDeleteDialog').dataset.id=state.playlistId;$('#playlistDeleteMessage').textContent=`删除“${state.playlists.find(p=>p.id===state.playlistId)?.name}”？只删除列表，音乐文件会保留。`;$('#playlistDeleteDialog').showModal();
+});
+$('#confirmDeletePlaylist').addEventListener('click',async()=>{
+  const button=$('#confirmDeletePlaylist');button.disabled=true;
+  try{await changePlaylist({action:'delete',id:$('#playlistDeleteDialog').dataset.id});$('#playlistDeleteDialog').close();toast('列表已删除，音乐文件保留');}
+  catch(error){toast(error.message,true);}finally{button.disabled=false;}
+});
+$('#playlistAddForm').addEventListener('submit',async event=>{
+  event.preventDefault();const button=$('#playlistAddForm button');button.disabled=true;
+  try{await changePlaylist({action:'add',id:$('#playlistAddTarget').value,files:[$('#playlistAddDialog').dataset.file]});$('#playlistAddDialog').close();toast('已加入播放列表');}
+  catch(error){toast(error.message,true);}finally{button.disabled=false;}
+});
+$('#playPlaylist').addEventListener('click',()=>{
+  state.queuePlaylist=state.playlistId;state.queue=MusicdlQueue.make(playlistFiles(state.playlistId),null,state.playMode);
+  const next=MusicdlQueue.move(state.queue);if(next){savePreferences();play(next,{fromQueue:true,startAt:0});}
+});
+$('#playMode').addEventListener('change',()=>{
+  state.playMode=$('#playMode').value;state.queue=MusicdlQueue.make(playlistFiles(state.queuePlaylist),state.playingFile,state.playMode);savePreferences();updateQueue();
+});
+$('#previousTrack').addEventListener('click',()=>movePlayer(-1));$('#nextTrack').addEventListener('click',()=>movePlayer(1));
+$('#audioPlayer').addEventListener('ended',()=>movePlayer(1,true));
+$('#openMusicImport').addEventListener('click',async()=>{
+  await refreshLibrary();$('#importPlaylist').innerHTML=playlistOptions();$('#importPlaylist').value=state.playlistId;
+  if(!state.uploading){$('#musicFiles').value='';$('#musicImportProgress').textContent='';}$('#musicImportDialog').showModal();
+});
+$('#musicImportForm').addEventListener('submit',async event=>{
+  event.preventDefault();if(state.uploading)return;
+  const files=[...$('#musicFiles').files],pid=$('#importPlaylist').value;
+  if(!files.length)return;if(files.length>50)return toast('每次最多导入 50 首音乐',true);
+  if(files.some(f=>!f.size||f.size>256*1024*1024))return toast('每首音频应大于 0 且不超过 256 MB',true);
+  state.uploading=true;$('#musicImportForm button').disabled=true;$('#musicFiles').disabled=$('#importPlaylist').disabled=true;
+  let completed=0;const failures=[];
+  try{
+    for(const file of files){
+      $('#musicImportProgress').textContent=`正在复制 ${completed+failures.length+1} / ${files.length}：${file.name}`;
+      try{
+        const response=await fetch('/api/imports',{method:'POST',headers:{'Content-Type':'application/octet-stream','X-Filename':encodeURIComponent(file.name),'X-Playlist-Id':pid},body:file});
+        const data=await response.json();if(!response.ok)throw new Error(data.error||'导入失败');completed++;
+      }catch(error){failures.push(`${file.name}：${error.message}`);}
+    }
+    $('#musicImportProgress').textContent=`已复制 ${completed} 首，正在后台检查歌词。${failures.length?'\n'+failures.join('\n'):''}`;
+    if(failures.length)toast(`${failures.length} 首导入失败，请查看导入窗口中的原因`,true);
+    else{$('#musicImportDialog').close();toast(`已导入 ${completed} 首，正在检查并补全歌词`);}
+    $('#importReport').open=true;await refreshLibrary();await refreshImports(true);
+  }finally{state.uploading=false;$('#musicImportForm button').disabled=false;$('#musicFiles').disabled=$('#importPlaylist').disabled=false;}
+});
 $('#downloadTabs').addEventListener('click',e=>{
   const button=e.target.closest('[data-status]'); if(!button) return;
-  state.downloadTab=button.dataset.status;
+  state.downloadTab=button.dataset.status;state.selectedHistory.clear();
   $$('#downloadTabs button').forEach(n=>n.classList.toggle('active',n===button)); renderDownloads();
 });
 $('#settingsButton').addEventListener('click',()=>{ $('#resultLimit').value=state.limit; $('#settingsDialog').showModal(); });
 $('#helpButton').addEventListener('click',()=>$('#helpDialog').showModal());
 $('#settingsForm').addEventListener('submit',e=>{ e.preventDefault();state.limit=Number($('#resultLimit').value);savePreferences();$('#settingsDialog').close();toast('设置已保存，下次搜索时生效'); });
-$$('dialog').forEach(dialog=>dialog.addEventListener('click',e=>{ if(e.target===dialog){const rect=dialog.getBoundingClientRect(); if(e.clientX<rect.left||e.clientX>rect.right||e.clientY<rect.top||e.clientY>rect.bottom) dialog.close();} }));
+$$('dialog').forEach(dialog=>dialog.addEventListener('click',e=>{ if(dialog.id==='musicDeleteDialog'&&state.deletingMusic)return; if(e.target===dialog){const rect=dialog.getBoundingClientRect(); if(e.clientX<rect.left||e.clientX>rect.right||e.clientY<rect.top||e.clientY>rect.bottom) dialog.close();} }));
 $('#menuButton').setAttribute('aria-controls','sidebar');
 $('#menuButton').addEventListener('click',()=>setSidebar(!$('#sidebar').classList.contains('open')));
 document.addEventListener('click',e=>{if($('#sidebar').classList.contains('open')&&!e.target.closest('#sidebar,#menuButton'))setSidebar(false);});
 window.addEventListener('resize',()=>setSidebar($('#sidebar').classList.contains('open')));
-$('#closePlayer').addEventListener('click',()=>{savePlayback(true);++state.lyricRequest;++state.playSerial;state.pendingResume=null;state.playingFile=null;state.lyricData=null;state.playback.lastFile=null;writeStorage('musicdl.playback',state.playback);$('#lyricsSearchDialog').close();setLyricsVisible(false);$('#audioPlayer').pause(); $('#audioPlayer').removeAttribute('src');$('#audioPlayer').load();$('#player').hidden=true;document.body.classList.remove('playing');setStudyFocus(false);renderStudy(true); });
+function closePlayer() {savePlayback(true);++state.lyricRequest;++state.playSerial;++state.readingRequest;state.pendingResume=null;state.playingFile=null;state.lyricData=null;state.lyrics=[];state.lyricsIndex=-1;state.playback.lastFile=null;writeStorage('musicdl.playback',state.playback);$('#lyricsSearchDialog').close();setLyricsVisible(false);$('#audioPlayer').pause();$('#audioPlayer').removeAttribute('src');$('#audioPlayer').load();$('#player').hidden=true;document.body.classList.remove('playing');setStudyFocus(false);renderStudy(true);}
+$('#closePlayer').addEventListener('click',closePlayer);
+$('#deleteHistory').addEventListener('click',deleteSelectedHistory);
+$('#deleteMusic').addEventListener('click',confirmMusicDeletion);
+$('#confirmDeleteMusic').addEventListener('click',deleteConfirmedMusic);
+$('#musicDeleteDialog').addEventListener('close',()=>{state.pendingMusicDelete=[];});
+$('#musicDeleteDialog').addEventListener('cancel',event=>{if(state.deletingMusic)event.preventDefault();});
+$('#clearHistorySelection').addEventListener('click',()=>{state.selectedHistory.clear();renderDownloads();});
+$('#clearMusicSelection').addEventListener('click',()=>{state.selectedMusic.clear();renderLibrary();});
+document.addEventListener('change',event=>{
+  const target=event.target;
+  if(target.dataset.selectHistory){const job=state.jobs.find(j=>j.id===target.dataset.selectHistory);if(job&&finishedJob(job)&&!state.deletingHistory){target.checked?state.selectedHistory.add(job.id):state.selectedHistory.delete(job.id);updateBulkSelection();}}
+  if(target.dataset.selectMusic&&!state.deletingMusic){target.checked?state.selectedMusic.add(target.dataset.selectMusic):state.selectedMusic.delete(target.dataset.selectMusic);updateBulkSelection();}
+  if(target.id==='selectAllHistory'&&!state.deletingHistory){visibleDownloadJobs().filter(finishedJob).forEach(j=>target.checked?state.selectedHistory.add(j.id):state.selectedHistory.delete(j.id));renderDownloads();}
+  if(target.id==='selectAllMusic'&&!state.deletingMusic){playlistFiles(state.playlistId).forEach(fid=>target.checked?state.selectedMusic.add(fid):state.selectedMusic.delete(fid));renderLibrary();}
+});
 $('#audioPlayer').addEventListener('error',()=>{if($('#audioPlayer').hasAttribute('src'))toast('无法播放此文件，请保存后使用本地播放器试听',true);});
 document.addEventListener('keydown',e=>{ if(e.key==='/'&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.target.closest('input,textarea,select,dialog')){e.preventDefault();setView('discover');$('#searchInput').focus();} if(e.key==='Escape')setSidebar(false); });
 
@@ -698,11 +979,11 @@ async function init() {
     $('#engineDot').classList.toggle('offline',!status.ready);
     $('#version').textContent=status.version?`v${status.version}`:'';
     $('#outputPath').textContent=status.output;
-    renderSources(); await refreshDownloads();await restorePlayback();
+    renderSources(); await refreshDownloads();await loadLibrary();renderLibrary();await restorePlayback();await refreshImports();
   } catch(error) {
     $('#engineText').textContent='音乐服务未连接'; $('#engineDot').classList.add('offline');
     $('#outputPath').textContent='连接服务后显示下载目录'; toast(error.message,true);
   }
-  setInterval(()=>{if(!document.hidden)refreshDownloads();},2500);
+  setInterval(()=>{if(!document.hidden){refreshDownloads();refreshImports();}},2500);
 }
 init();

@@ -19,10 +19,13 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import lyrics
 import songtools
+import fastsearch
+import librarytools
+import musiccompat
 
 ROOT = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.environ.get("MUSICDL_DATA_DIR", str(ROOT))).resolve()
@@ -45,8 +48,10 @@ LOCK = threading.RLock()
 SEARCHES: dict = {}
 CACHE: dict = {}
 JOBS: dict = {}
+IMPORTS: dict = {}
 SEARCH_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="search")
 DOWNLOAD_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="download")
+IMPORT_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="import-lyrics")
 
 
 def validate_deployment(host, password, public_origin):
@@ -71,6 +76,8 @@ def clean(value, fallback="—"):
 
 
 def song_view(song, sid):
+    if isinstance(song, dict) and song.get('fast'):
+        return {key: value for key, value in song.items() if key not in {'raw', 'fast'}} | {'id': sid}
     return {"id": sid, "title": clean(song.song_name, "未知歌曲"),
             "artist": clean(song.singers, "未知歌手"), "album": clean(song.album),
             "source": song.source, "format": clean(song.ext, "未知").upper(),
@@ -81,18 +88,23 @@ def song_view(song, sid):
 
 def build_client(source, limit=12):
     from musicdl.musicdl import MusicClient
-    return MusicClient(music_sources=[source], init_music_clients_cfg={source: {
+    client = MusicClient(music_sources=[source], init_music_clients_cfg={source: {
         "work_dir": str(OUTPUT / source), "disable_print": True,
         "search_size_per_source": limit, "search_size_per_page": min(limit, 10), "max_retries": 1,
     }}, requests_overrides={source: {"timeout": (6, 12)}})
+    musiccompat.adapt_client(client.music_clients[source])
+    return client
 
 
-def source_process(pipe, source, keyword, limit):
+def source_process(pipe, source, keyword, limit, mode='full'):
     """Isolate third-party calls so a stalled platform can be stopped safely."""
     try:
         client = build_client(source, limit).music_clients[source]
-        songs = client.search(keyword=keyword, num_threadings=3, request_overrides={"timeout": (6, 12)})
-        songs = [s for s in songs if not s.episodes and s.with_valid_download_url][:limit]
+        if mode == 'fast':
+            songs = fastsearch.search(client, keyword, limit)
+        else:
+            songs = client.search(keyword=keyword, num_threadings=3, request_overrides={"timeout": (6, 12)})
+            songs = [s for s in songs if not s.episodes and s.with_valid_download_url][:limit]
         pipe.send((songs, None))
     except Exception as exc:
         pipe.send(([], str(exc)[:300]))
@@ -100,14 +112,14 @@ def source_process(pipe, source, keyword, limit):
         pipe.close()
 
 
-def search_source(source, keyword, limit):
+def isolated_call(target, args, timeout):
     context = mp.get_context("spawn")
     receiver, sender = context.Pipe(duplex=False)
-    process = context.Process(target=source_process, args=(sender, source, keyword, limit), daemon=True)
+    process = context.Process(target=target, args=(sender, *args), daemon=True)
     try:
         process.start()
         sender.close()
-        if receiver.poll(65):
+        if receiver.poll(timeout):
             try:
                 return receiver.recv()
             except EOFError:
@@ -122,10 +134,32 @@ def search_source(source, keyword, limit):
         sender.close()
 
 
-def search_task(search_id, keyword, sources, limit):
+def search_source(source, keyword, limit, mode='full'):
+    return isolated_call(source_process, (source, keyword, limit, mode), 25 if mode == 'fast' else 65)
+
+
+def resolve_process(pipe, descriptor):
+    try:
+        client = build_client(descriptor['source'], 1).music_clients[descriptor['source']]
+        pipe.send((fastsearch.resolve(client, descriptor), None))
+    except Exception as exc:
+        pipe.send((None, str(exc)[:300]))
+    finally:
+        pipe.close()
+
+
+def resolve_source(descriptor):
+    song, error = isolated_call(resolve_process, (descriptor,), 65)
+    if error:
+        raise ValueError(error)
+    return song
+
+
+def search_task(search_id, keyword, sources, limit, mode='full'):
     try:
         with ThreadPoolExecutor(max_workers=3) as pool:
-            futures = {pool.submit(search_source, s, keyword, limit): s for s in sources}
+            futures = {pool.submit(search_source, s, keyword, limit, mode) if mode == 'fast'
+                       else pool.submit(search_source, s, keyword, limit): s for s in sources}
             for future in as_completed(futures):
                 source = futures[future]
                 try:
@@ -161,7 +195,7 @@ def persist_jobs():
 def load_jobs():
     try:
         for job in json.loads((STATE / "history.json").read_text(encoding="utf-8")):
-            if job["status"] in {"queued", "downloading"}:
+            if job["status"] in {"queued", "resolving", "downloading"}:
                 job.update(status="failed", error="服务已重启，请重新搜索并下载")
             JOBS[job["id"]] = job
     except (OSError, ValueError, KeyError, TypeError):
@@ -173,7 +207,9 @@ def file_id(path):
 
 
 def library():
-    known = {j.get("fileId"): j for j in JOBS.values() if j.get("fileId")}
+    metadata = librarytools.read_metadata(STATE)
+    known = {j.get("fileId"): j for j in [*JOBS.values(), *IMPORTS.values()] if j.get("fileId")}
+    pending = {j.get('pendingFileId') for j in JOBS.values() if j.get('status') in {'queued', 'resolving', 'downloading'}}
     entries = []
     for path in OUTPUT.rglob("*"):
         if not path.is_file() or path.suffix.lstrip(".").lower() not in AUDIO_EXTS:
@@ -182,14 +218,90 @@ def library():
         if not resolved.is_relative_to(OUTPUT.resolve()) or path.stat().st_size == 0:
             continue
         fid = file_id(path)
+        if fid in pending:
+            continue
         job = known.get(fid)
-        entries.append({**(job["song"] if job else {"title": path.stem, "artist": "本地音乐",
+        entries.append({**(job["song"] if job else metadata.get(fid) or {"title": path.stem, "artist": "本地音乐",
                          "album": "—", "source": path.relative_to(OUTPUT).parts[0], "duration": "—",
                          **lyrics.audio_metadata(path)}),
                         "id": fid, "fileId": fid, "format": path.suffix[1:].upper(),
                         "size": f"{path.stat().st_size / 1048576:.1f} MB", "sizeBytes": path.stat().st_size,
                         "modified": path.stat().st_mtime, "fileName": path.name})
     return sorted(entries, key=lambda s: s["modified"], reverse=True)
+
+
+def persist_imports():
+    with LOCK:
+        librarytools.save_json(STATE, 'imports.json', list(IMPORTS.values()))
+
+
+def load_imports():
+    try:
+        for item in json.loads((STATE / 'imports.json').read_text(encoding='utf-8')):
+            if item.get('status') == 'checking':
+                item.update(status='completed', lyricStatus='failed', message='服务已重启，歌词补全中断，可在播放器中在线找歌词')
+            IMPORTS[item['id']] = item
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass
+
+
+def complete_import_lyrics(fid, raw, message='已补全歌词'):
+    """Resolve pending import warnings under LOCK; callers persist changed records."""
+    if not raw['original'].strip():
+        return False
+    changed = False
+    for job in IMPORTS.values():
+        if job.get('fileId') == fid and job.get('lyricStatus') in {'checking', 'failed'}:
+            job.update(status='completed', lyricStatus='existing', message=message)
+            changed = True
+    return changed
+
+
+def import_lyrics_task(iid):
+    with LOCK:
+        if iid not in IMPORTS:
+            return
+        job = copy.deepcopy(IMPORTS[iid])
+    try:
+        file = find_file(job['fileId'])
+        if not file:
+            raise ValueError('导入的音频文件已移走')
+        raw = lyrics.load(file, job['fileId'], STATE)
+        if raw['original'].strip():
+            status, message = 'existing', '已保留音频自带歌词'
+        else:
+            choices = lyrics.candidates(job['song'])
+            selected = librarytools.exact_lyric_match(job['song'], choices)
+            if not selected:
+                raise ValueError('未找到唯一匹配的歌词版本，请在播放器中在线找歌词或导入 LRC')
+            fetched = lyrics.netease_lyrics(selected['id'])
+            if not fetched['original'].strip():
+                raise ValueError('匹配版本没有歌词，可手动导入 LRC；纯音乐可以没有歌词')
+            with LOCK:
+                if iid not in IMPORTS or not find_file(job['fileId']):
+                    return
+                # A manual import while the network request was running takes precedence.
+                latest = lyrics.load(file, job['fileId'], STATE)
+                if latest['original'].strip():
+                    status, message = 'existing', '已保留现有歌词'
+                else:
+                    lyrics.save(job['fileId'], STATE, **fetched, source='导入音乐 · 自动补全歌词')
+                    status, message = 'filled', '已自动补全歌词' + ('与译文' if fetched['translation'].strip() else '')
+        with LOCK:
+            if iid in IMPORTS:
+                IMPORTS[iid].update(status='completed', lyricStatus=status, message=message)
+    except Exception as exc:
+        with LOCK:
+            if iid in IMPORTS:
+                # A network failure must not undo lyrics saved while it was running.
+                file = find_file(job['fileId'])
+                latest = lyrics.load(file, job['fileId'], STATE) if file else {'original': ''}
+                if latest['original'].strip():
+                    complete_import_lyrics(job['fileId'], latest, '已保留现有歌词')
+                else:
+                    IMPORTS[iid].update(status='completed', lyricStatus='failed', message=str(exc)[:300])
+    finally:
+        persist_imports()
 
 
 def find_file(fid):
@@ -200,11 +312,121 @@ def find_file(fid):
     return None
 
 
+def deletion_ids(body):
+    ids = body.get('ids')
+    if (not isinstance(ids, list) or not 1 <= len(ids) <= 5000
+            or any(not isinstance(fid, str) or not re.fullmatch(r'[a-f0-9]{32}', fid) for fid in ids)):
+        raise ValueError('请选择 1–5000 条有效记录')
+    return list(dict.fromkeys(ids))
+
+
+def delete_history(body):
+    ids = deletion_ids(body)
+    with LOCK:
+        if any(JOBS[jid]['status'] not in {'completed', 'failed'} for jid in ids if jid in JOBS):
+            raise ValueError('进行中的下载任务不能删除，请等待任务结束')
+        # History is not the music library's metadata store. Retain song details
+        # when removing completed jobs, including files without embedded tags.
+        metadata = librarytools.read_metadata(STATE)
+        for jid in ids:
+            job = JOBS.get(jid)
+            if job and job.get('fileId'):
+                metadata[job['fileId']] = job['song']
+        librarytools.save_json(STATE, 'library-metadata.json', metadata)
+        removed = [jid for jid in ids if jid in JOBS]
+        remaining = [job for jid, job in JOBS.items() if jid not in ids]
+        librarytools.save_json(STATE, 'history.json', remaining[-500:])
+        for jid in removed:
+            del JOBS[jid]
+    return {'deleted': removed}
+
+
+def delete_music(body):
+    if body.get('confirmed') is not True:
+        raise ValueError('请先确认永久删除本地音乐文件')
+    ids = deletion_ids(body)
+    with LOCK:
+        active = {j.get('pendingFileId') or j.get('fileId') for j in JOBS.values()
+                  if j.get('status') in {'queued', 'resolving', 'downloading'}}
+        if active.intersection(ids):
+            raise ValueError('选中的音乐正在下载，请等待下载完成')
+        # Read state and verify every absolute path before deleting any file.
+        metadata = librarytools.read_metadata(STATE)
+        lists = librarytools.read_playlists(STATE)
+        root = OUTPUT.resolve()
+        files = {file_id(path): path for path in OUTPUT.rglob('*')
+                 if path.is_file() and path.suffix[1:].lower() in AUDIO_EXTS
+                 and path.resolve().is_relative_to(root)}
+        same_stem = {}
+        for path in files.values():
+            same_stem.setdefault(path.with_suffix(''), []).append(path)
+        targets = {}
+        for fid in ids:
+            audio = files.get(fid)
+            if audio:
+                candidates = [audio, *(audio.with_suffix(ext) for ext in ('.lrc', '.translation.lrc', '.zh.lrc', '.trans.lrc'))]
+                if any(not path.resolve().is_relative_to(root) for path in candidates):
+                    raise ValueError('歌曲或歌词路径超出音乐库，已停止删除')
+                targets[fid] = candidates
+        deleted, missing, errors, warnings = [], [], [], []
+        for fid in ids:
+            if fid not in targets:
+                missing.append(fid)
+                continue
+            audio, *sidecars = targets[fid]
+            try:
+                audio.unlink()
+            except FileNotFoundError:
+                missing.append(fid)
+            except OSError:
+                errors.append({'id': fid, 'message': '文件无法删除，可能正在使用或没有目录权限'})
+                continue
+            else:
+                deleted.append(fid)
+            # Different audio formats may share the same external lyrics.
+            if any(path != audio and path.exists() for path in same_stem[audio.with_suffix('')]):
+                continue
+            for path in sidecars:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    warnings.append({'id': fid, 'message': '音频已删除，但部分歌词文件无法删除'})
+        removed = set(deleted + missing)
+        for fid in removed:
+            metadata.pop(fid, None)
+            for suffix in ('.json', '.tmp'):
+                cache = STATE / 'lyrics' / (fid + suffix)
+                if not cache.resolve().is_relative_to(STATE.resolve()):
+                    warnings.append({'id': fid, 'message': '歌词缓存路径异常，未删除缓存'})
+                    continue
+                try:
+                    cache.unlink(missing_ok=True)
+                except OSError:
+                    warnings.append({'id': fid, 'message': '音频已删除，但歌词缓存无法删除'})
+        for jid in [jid for jid, job in JOBS.items() if job.get('fileId') in removed]:
+            del JOBS[jid]
+        for iid in [iid for iid, job in IMPORTS.items() if job.get('fileId') in removed]:
+            del IMPORTS[iid]
+        for item in lists:
+            item['files'] = [fid for fid in item['files'] if fid not in removed]
+        librarytools.save_json(STATE, 'library-metadata.json', metadata)
+        librarytools.save_json(STATE, 'playlists.json', lists)
+        persist_jobs()
+        persist_imports()
+    return {'deleted': deleted, 'missing': missing, 'errors': errors, 'warnings': warnings}
+
+
 def download_task(jid, song):
     with LOCK:
-        JOBS[jid]["status"] = "downloading"
+        JOBS[jid]["status"] = "resolving" if isinstance(song, dict) and song.get('fast') else "downloading"
     persist_jobs()
     try:
+        if isinstance(song, dict) and song.get('fast'):
+            song = resolve_source(song)
+            with LOCK:
+                JOBS[jid]['song'] = song_view(song, JOBS[jid]['song']['id'])
+                JOBS[jid]['status'] = 'downloading'
+            persist_jobs()
         ext = clean(song.ext, "").lstrip(".").lower()
         if ext not in AUDIO_EXTS:
             raise ValueError("该音频格式暂不支持")
@@ -213,6 +435,8 @@ def download_task(jid, song):
         name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", clean(song.song_name, "音乐"))[:65].strip(" .") or "音乐"
         artist = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", clean(song.singers, "未知歌手"))[:35].strip(" .")
         target = directory / f"{name} - {artist} - {jid[:8]}.{ext}"
+        with LOCK:
+            JOBS[jid]['pendingFileId'] = file_id(target)
         song.work_dir = str(directory)
         song._save_path = str(target)
         client = build_client(song.source).music_clients[song.source]
@@ -329,9 +553,33 @@ class Handler(BaseHTTPRequestHandler):
                 jobs = copy.deepcopy(list(JOBS.values()))
             return self.json_response({"jobs": sorted(jobs, key=lambda j: j["created"], reverse=True)})
         if path == "/api/library":
+            try:
+                with LOCK:
+                    songs = library()
+                return self.json_response({"songs": songs})
+            except ValueError as exc:
+                return self.json_response({'error': str(exc)}, 400)
+        if path == '/api/playlists':
+            try:
+                with LOCK:
+                    lists = librarytools.playlists(STATE, [s['fileId'] for s in library()])
+                return self.json_response({'playlists': lists})
+            except ValueError as exc:
+                return self.json_response({'error': str(exc)}, 400)
+        if path == '/api/imports':
             with LOCK:
-                songs = library()
-            return self.json_response({"songs": songs})
+                changed = False
+                # Repair records written before saving lyrics also updated import status.
+                for job in IMPORTS.values():
+                    if job.get('lyricStatus') != 'failed':
+                        continue
+                    file = find_file(job['fileId'])
+                    if file:
+                        changed = complete_import_lyrics(job['fileId'], lyrics.load(file, job['fileId'], STATE)) or changed
+                if changed:
+                    persist_imports()
+                items = copy.deepcopy(list(IMPORTS.values()))
+            return self.json_response({'imports': sorted(items, key=lambda item: item['created'], reverse=True)})
         if path.startswith("/api/lyrics/"):
             match = re.fullmatch(r"/api/lyrics/([a-f0-9]{32})(/furigana)?", path)
             if not match:
@@ -353,7 +601,7 @@ class Handler(BaseHTTPRequestHandler):
             if file:
                 return self.serve_file(file, attachment="download" in urlparse(self.path).query)
             return self.json_response({"error": "文件不存在"}, 404)
-        assets = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/memory.js": "memory.js", "/styles.css": "styles.css", "/lyrics.css": "lyrics.css", "/favicon.svg": "favicon.svg"}
+        assets = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/memory.js": "memory.js", "/queue.js": "queue.js", "/styles.css": "styles.css", "/lyrics.css": "lyrics.css", "/favicon.svg": "favicon.svg"}
         if path in assets:
             return self.serve_file(ROOT / "web" / assets[path])
         return self.json_response({"error": "页面不存在"}, 404)
@@ -403,14 +651,27 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             path = urlparse(self.path).path
+            if path == '/api/imports':
+                self.close_connection = True
+                return self.import_audio(length)
             is_lyrics = path.startswith("/api/lyrics/")
-            if not 0 < length <= (1572864 if is_lyrics else 16384):
+            if not 0 < length <= (1572864 if is_lyrics else 262144 if path in {'/api/playlists', '/api/downloads/delete', '/api/library/delete'} else 16384):
                 self.close_connection = True
                 return self.json_response({"error": "请求长度无效"}, 413)
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
                 raise ValueError("无效请求")
             path = urlparse(self.path).path
+            if path == '/api/downloads/delete':
+                return self.json_response(delete_history(body))
+            if path == '/api/library/delete':
+                return self.json_response(delete_music(body))
+            if path == '/api/playlists':
+                with LOCK:
+                    available = [s['fileId'] for s in library()]
+                    pid = librarytools.edit_playlist(STATE, body, available)
+                    lists = librarytools.playlists(STATE, available)
+                return self.json_response({'id': pid, 'playlists': lists})
             if path == "/api/moegirl":
                 title, artist = body.get("title"), body.get("artist", "")
                 if not isinstance(title, str) or not 1 <= len(title.strip()) <= 200 or not isinstance(artist, str) or len(artist) > 200 or any(c in title for c in "|\r\n\x00"):
@@ -446,7 +707,8 @@ class Handler(BaseHTTPRequestHandler):
                             selected = meta["sourceId"]
                         else:
                             choices = lyrics.candidates(meta, keyword)
-                            exact = lyrics.exact_candidate(meta, choices) if not keyword else None
+                            matcher = librarytools.exact_lyric_match if meta.get('source') == 'LocalImport' else lyrics.exact_candidate
+                            exact = matcher(meta, choices) if not keyword else None
                             if not exact:
                                 return self.json_response({"candidates": choices})
                             selected = exact["id"]
@@ -456,16 +718,24 @@ class Handler(BaseHTTPRequestHandler):
                     # Explicit version selection replaces both tracks to keep their timing aligned.
                     raw = {**fetched, "source": "网易云歌词"}
                 with LOCK:
+                    if not find_file(fid):
+                        return self.json_response({'error': '文件已删除，无法保存歌词'}, 404)
                     if action == "lookup" and not body.get("songId"):
                         latest_raw = lyrics.load(file, fid, STATE)
                         if latest_raw != initial_raw:
                             return self.json_response(lyrics.align(**latest_raw))
                     lyrics.save(fid, STATE, **raw)
+                    message = '已手动补全歌词' if action == 'import' else '已在线补全歌词'
+                    if complete_import_lyrics(fid, raw, message):
+                        persist_imports()
                 return self.json_response(lyrics.align(**raw))
             if path == "/api/search":
                 keyword = body.get("keyword", "")
                 sources = body.get("sources", list(SOURCES)[:3])
                 limit = body.get("limit", 12)
+                mode = body.get("mode", "full")
+                if mode not in {'fast', 'full'}:
+                    raise ValueError("请选择快速搜索或完整搜索")
                 if not isinstance(keyword, str) or not 1 <= len(keyword.strip()) <= 100:
                     raise ValueError("请输入 1–100 字的搜索关键词")
                 if not isinstance(sources, list) or not sources or any(s not in SOURCES for s in sources):
@@ -483,8 +753,8 @@ class Handler(BaseHTTPRequestHandler):
                     sid = uuid.uuid4().hex
                     sources = list(dict.fromkeys(sources))
                     SEARCHES[sid] = {"id": sid, "status": "searching", "keyword": keyword.strip(),
-                                     "songs": [], "errors": [], "completed": 0, "total": len(sources), "created": now}
-                SEARCH_POOL.submit(search_task, sid, keyword.strip(), sources, limit)
+                                     "songs": [], "errors": [], "completed": 0, "total": len(sources), "created": now, "mode": mode}
+                SEARCH_POOL.submit(search_task, sid, keyword.strip(), sources, limit, mode)
                 return self.json_response({"id": sid}, 202)
             if path == "/api/downloads":
                 ids = body.get("ids")
@@ -494,10 +764,10 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     if any(sid not in CACHE for sid in ids):
                         raise ValueError("搜索结果已过期，请重新搜索；收藏中的歌曲也需要重新搜索")
-                    if sum(j["status"] in {"queued", "downloading"} for j in JOBS.values()) + len(set(ids)) > 100:
+                    if sum(j["status"] in {"queued", "resolving", "downloading"} for j in JOBS.values()) + len(set(ids)) > 100:
                         return self.json_response({"error": "下载队列已满，请稍后重试"}, 429)
                     for sid in dict.fromkeys(ids):
-                        existing = next((j for j in JOBS.values() if j.get("song", {}).get("id") == sid and j["status"] in {"queued", "downloading"}), None)
+                        existing = next((j for j in JOBS.values() if j.get("song", {}).get("id") == sid and j["status"] in {"queued", "resolving", "downloading"}), None)
                         if existing:
                             queued.append(existing["id"])
                             continue
@@ -512,9 +782,62 @@ class Handler(BaseHTTPRequestHandler):
             return self.json_response({"error": "接口不存在"}, 404)
         except (ValueError, TypeError, KeyError) as exc:
             self.json_response({"error": str(exc)}, 400)
+        except OSError:
+            self.json_response({'error': '文件无法保存，请检查磁盘空间和目录权限'}, 500)
+
+    def import_audio(self, length):
+        if not 0 < length <= librarytools.MAX_IMPORT:
+            return self.json_response({'error': '每首音频应大于 0 且不超过 256 MB'}, 413)
+        filename = unquote(self.headers.get('X-Filename', ''))
+        if not filename or len(filename) > 240 or any(c in filename for c in '/\\\r\n\x00'):
+            raise ValueError('无效的导入文件名')
+        ext = Path(filename).suffix.lstrip('.').lower()
+        if ext not in AUDIO_EXTS:
+            raise ValueError('请选择支持的音频文件，如 MP3、FLAC、WAV、M4A')
+        pid = self.headers.get('X-Playlist-Id', 'all')
+        with LOCK:
+            if pid not in {item['id'] for item in librarytools.playlists(STATE, [])}:
+                raise ValueError('目标播放列表不存在，请刷新后重试')
+        directory = OUTPUT / 'LocalImport'
+        directory.mkdir(parents=True, exist_ok=True)
+        if not directory.resolve().is_relative_to(OUTPUT.resolve()):
+            raise ValueError('导入目录不在音乐库内')
+        iid = uuid.uuid4().hex
+        target = directory / f'{iid}.{ext}'
+        try:
+            with target.open('xb') as stream:
+                remaining = length
+                while remaining:
+                    chunk = self.rfile.read(min(1048576, remaining))
+                    if not chunk:
+                        raise ValueError('文件上传中断，请重新导入')
+                    stream.write(chunk)
+                    remaining -= len(chunk)
+            duration = int(librarytools.validate_audio(target))
+            fid = file_id(target)
+            meta = {'title': Path(filename).stem, 'artist': '本地音乐', 'album': '—',
+                    'duration': f'{duration//3600:02}:{duration//60%60:02}:{duration%60:02}', **lyrics.audio_metadata(target)}
+            song = {**meta, 'id': fid, 'fileId': fid, 'source': 'LocalImport', 'format': ext.upper(),
+                    'size': f'{length/1048576:.1f} MB', 'sizeBytes': length, 'fileName': filename}
+            with LOCK:
+                # Revalidate after the upload: another tab may have deleted the target list.
+                if pid != 'all':
+                    librarytools.edit_playlist(STATE, {'action': 'add', 'id': pid, 'files': [fid]}, [fid])
+                IMPORTS[iid] = {'id': iid, 'fileId': fid, 'song': song, 'filename': filename,
+                                'playlistId': pid, 'status': 'checking', 'created': time.time(),
+                                'lyricStatus': 'checking', 'message': '正在检查并补全歌词'}
+                persist_imports()
+        except Exception:
+            with LOCK:
+                IMPORTS.pop(iid, None)
+            target.unlink(missing_ok=True)
+            raise
+        IMPORT_POOL.submit(import_lyrics_task, iid)
+        return self.json_response({'import': copy.deepcopy(IMPORTS[iid])}, 202)
 
 
 def main():
+    musiccompat.configure_stdio()
     parser = argparse.ArgumentParser(description="musicdl 网页工作台")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
@@ -525,6 +848,7 @@ def main():
         parser.error(str(exc))
     OUTPUT.mkdir(parents=True, exist_ok=True)
     load_jobs()
+    load_imports()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Musicdl Web: {PUBLIC_ORIGIN or f'http://{args.host}:{args.port}'}", flush=True)
     try:

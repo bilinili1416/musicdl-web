@@ -12,4 +12,4 @@ if ($LASTEXITCODE -ne 0) {
     & $taskPython -m pip install -r requirements.txt
     if ($LASTEXITCODE -ne 0) { throw '运行依赖安装失败' }
 }
-& $taskPython server.py @args
+& $taskPython -X utf8 server.py @args
