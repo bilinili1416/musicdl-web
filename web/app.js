@@ -31,6 +31,10 @@ const state = {
   playback:memory.playback(readStorage('musicdl.playback', {})), pendingResume:null, playSerial:0, lastCheckpoint:0,
   storageWarning:false, lyricData:null, furigana:readStorage('musicdl.furigana', true) === true,
   readingRequest:0, wikiRequest:0, wikiTab:null,
+  studyFurigana:readStorage('musicdl.studyFurigana',true) === true,
+  studyTranslation:readStorage('musicdl.studyTranslation',true) === true,
+  studyFont:[16,19,22].includes(readStorage('musicdl.studyFont',19))?readStorage('musicdl.studyFont',19):19,
+  studyReturnView:'discover', studyPending:false,
 };
 if (!state.selectedSources.size) state.selectedSources.add(sourceDefaults[0].id);
 
@@ -108,15 +112,18 @@ function renderSources() {
   $('#toggleSources').textContent=state.selectedSources.size===state.sources.length?'重置':'全选';
 }
 function setView(view) {
-  if(!['discover','downloads','favorites','library'].includes(view)) return;
+  if(!['discover','downloads','favorites','library','study'].includes(view)) return;
+  if(view==='study' && state.view!=='study')state.studyReturnView=state.view;
+  if(view!=='study')setStudyFocus(false);
   state.view=view;
   $$('.view').forEach(n=>n.hidden=n.id!==`${view}View`);
   $$('.nav-item[data-view]').forEach(n=>{n.classList.toggle('active',n.dataset.view===view);n.setAttribute('aria-current',n.dataset.view===view?'page':'false');});
-  $('#breadcrumbTitle').textContent={discover:'发现音乐',downloads:'下载管理',favorites:'我的收藏',library:'本地音乐'}[view];
+  $('#breadcrumbTitle').textContent={discover:'发现音乐',downloads:'下载管理',favorites:'我的收藏',library:'本地音乐',study:'歌词鉴赏'}[view];
   setSidebar(false);
   if(view==='library') refreshLibrary();
   if(view==='downloads') { renderDownloads(); refreshDownloads(true); }
   if(view==='favorites') renderFavorites();
+  if(view==='study'){setLyricsVisible(false);renderStudy(true);}
   window.scrollTo({top:0,behavior:'instant'});
 }
 function visibleSongs() {
@@ -214,7 +221,7 @@ function jobStatus(job) {
   return `<div class="job-status ${esc(job.status)}">${job.status==='downloading'?'<span class="spinner"></span>':job.status==='completed'?icon('check'):''}<span>${labels[job.status]||esc(job.status)}</span>${job.error?`<span class="job-error" title="${esc(job.error)}">${esc(job.error)}</span>`:''}</div>`;
 }
 function fileActions(song) {
-  return `<div class="row-actions"><button class="icon-button" data-play="${esc(song.fileId)}" title="播放" aria-label="播放 ${esc(song.title)}">${icon('play')}</button><a class="icon-button" href="/api/files/${encodeURIComponent(song.fileId)}?download=1" title="保存文件" aria-label="保存 ${esc(song.title)}">${icon('download')}</a></div>`;
+  return `<div class="row-actions"><button class="icon-button" data-play="${esc(song.fileId)}" title="播放" aria-label="播放 ${esc(song.title)}">${icon('play')}</button><button class="icon-button" data-study="${esc(song.fileId)}" title="歌词鉴赏" aria-label="鉴赏 ${esc(song.title)}">${icon('book')}</button><a class="icon-button" href="/api/files/${encodeURIComponent(song.fileId)}?download=1" title="保存文件" aria-label="保存 ${esc(song.title)}">${icon('download')}</a></div>`;
 }
 function downloadRow(job,index=0) {
   const s=job.song;
@@ -317,20 +324,22 @@ async function restorePlayback() {
 }
 
 function setLyricsVisible(visible) {
+  if(state.view==='study')visible=false;
   $('#lyricsPanel').hidden=!visible;
   $('#toggleLyrics').setAttribute('aria-expanded',String(visible));
   $('#toggleLyrics').setAttribute('aria-label',visible?'收起歌词':'显示歌词');
   if(visible) updateLyrics(true);
 }
-function lyricOriginal(text,tokens) {
-  if(!state.furigana || !Array.isArray(tokens) || tokens.map(t=>t.text).join('')!==text)return esc(text);
+function lyricOriginal(text,tokens,readings=state.furigana) {
+  if(!readings || !Array.isArray(tokens) || tokens.map(t=>t.text).join('')!==text)return esc(text);
   return tokens.map(token=>token.reading?`<ruby>${esc(token.text)}<rp>（</rp><rt>${esc(token.reading)}</rt><rp>）</rp></ruby>`:esc(token.text)).join('');
 }
 async function loadReadings(data,force=false) {
-  if(!state.furigana || !state.playingFile || data.readingNote)return;
+  if(!(state.furigana || (state.view==='study' && state.studyFurigana)) || !state.playingFile || data.readingNote)return;
   if(!force && !/[\u3041-\u3096\u30a1-\u30fa\uff66-\uff9d]/.test((data.lines || []).map(l=>l.text).join('\n')+(data.plain || '')))return;
   const fid=state.playingFile,request=state.lyricRequest,reading=++state.readingRequest;
   $('#readingStatus').textContent='正在本地生成读音…';
+  if(state.view==='study')$('#studyReadingNote').textContent='正在本地生成读音…';
   try {
     const annotated=await api(`/api/lyrics/${encodeURIComponent(fid)}/furigana`);
     if(fid!==state.playingFile || request!==state.lyricRequest || reading!==state.readingRequest || state.lyricData!==data)return;
@@ -338,7 +347,7 @@ async function loadReadings(data,force=false) {
     if(JSON.stringify(annotated.lines.map(l=>[l.time,l.text,l.translation]))!==JSON.stringify((data.lines || []).map(l=>[l.time,l.text,l.translation])) || annotated.plain!==(data.plain || '')){loadLyrics(fid);return;}
     annotated.lookupAttempted=data.lookupAttempted;
     state.lyricCache.set(fid,annotated);renderLyrics(annotated,true);
-  } catch(error) {if(request===state.lyricRequest && reading===state.readingRequest && state.furigana)$('#readingStatus').textContent=error.message;}
+  } catch(error) {if(request===state.lyricRequest && reading===state.readingRequest){$('#readingStatus').textContent=error.message;if(state.view==='study')$('#studyReadingNote').textContent=error.message;}}
 }
 function renderLyrics(data,preserveScroll=false,readings=true) {
   const previousScroll=$('#lyricsScroll').scrollTop;
@@ -360,6 +369,7 @@ function renderLyrics(data,preserveScroll=false,readings=true) {
   $('#lyricsLines').innerHTML=content;
   $('#lyricsScroll').scrollTop=preserveScroll?previousScroll:0;
   updateLyrics(!preserveScroll);
+  renderStudy(false,false);
   if(readings)loadReadings(data);
 }
 function updateLyrics(force=false) {
@@ -383,7 +393,8 @@ function updateLyrics(force=false) {
 }
 async function loadLyrics(fid) {
   const request=++state.lyricRequest;
-  state.lyrics=[];state.lyricsIndex=-1;
+  state.lyrics=[];state.lyricsIndex=-1;state.lyricData=null;
+  renderStudy(true);
   $('#lyricsLines').innerHTML='<div class="lyrics-loading"><span class="spinner"></span>正在读取歌词…</div>';
   $('#lyricsStatus').textContent='正在读取歌词…';
   try {
@@ -409,7 +420,7 @@ async function loadLyrics(fid) {
     }
   } catch(error) {
     if(request!==state.lyricRequest)return;
-    renderLyrics({});$('#lyricsStatus').textContent=error.message;
+    renderLyrics({});$('#lyricsStatus').textContent=error.message;$('#studyStatus').textContent=error.message;
   }
 }
 function renderLyricCandidates(candidates) {
@@ -481,7 +492,7 @@ $('#lyricsOffset').addEventListener('change',()=>{
 ['wheel','touchstart','pointerdown'].forEach(name=>$('#lyricsScroll').addEventListener(name,()=>{state.lyricScrollUntil=Date.now()+5000;},{passive:true}));
 $('#followLyrics').addEventListener('click',()=>{state.lyricScrollUntil=0;updateLyrics(true);});
 $('#hideLyrics').addEventListener('click',()=>{setLyricsVisible(false);$('#toggleLyrics').focus();});
-$('#toggleLyrics').addEventListener('click',()=>setLyricsVisible($('#lyricsPanel').hidden));
+$('#toggleLyrics').addEventListener('click',()=>{if(state.view==='study')setView(state.studyReturnView);setLyricsVisible($('#lyricsPanel').hidden);});
 ['timeupdate','seeked','loadedmetadata','ended'].forEach(name=>$('#audioPlayer').addEventListener(name,()=>updateLyrics()));
 
 $('#furiganaToggle').addEventListener('change',()=>{
@@ -512,6 +523,74 @@ $('#audioPlayer').addEventListener('play',()=>{$('#playerResume').hidden=true;})
 window.addEventListener('pagehide',()=>savePlayback(true));
 document.addEventListener('visibilitychange',()=>{if(document.hidden)savePlayback(true);});
 $('#clearSearchHistory').addEventListener('click',()=>{state.searchHistory=[];writeStorage('musicdl.searchHistory',[]);renderSearchHistory();toast('搜索历史已清空');});
+
+function openStudy(fid=state.playingFile) {
+  if(fid && fid!==state.playingFile)play(fid,{autoplay:false});
+  setView('study');
+}
+function setStudyFocus(enabled) {
+  document.body.classList.toggle('study-immersive',enabled);
+  $('#studyFocus').setAttribute('aria-pressed',String(enabled));
+  $('#studyFocus').textContent=enabled?'退出沉浸':'沉浸阅读';
+}
+function studySelected() {
+  const selection=window.getSelection(),lines=$('#studyLines');
+  return selection && !selection.isCollapsed && lines.contains(selection.anchorNode) && lines.contains(selection.focusNode);
+}
+function renderStudy(force=false,readings=true) {
+  if(state.view!=='study')return;
+  if(force && studySelected())window.getSelection().removeAllRanges();
+  if(!force && studySelected()){state.studyPending=true;return;}
+  state.studyPending=false;
+  const data=state.lyricData,ready=Boolean(state.playingFile && data),scroll=window.scrollY;
+  $('#studyToolbar').hidden=!ready;$('#studyPaper').hidden=!ready;
+  $('#studyEmpty').hidden=ready;
+  if(!ready){$('#studyEmpty').innerHTML=state.playingFile?'<div class="lyrics-loading"><span class="spinner"></span>正在读取歌词…</div>':empty('book','选一首歌，慢慢读','在本地音乐中点击书本图标，或播放后打开「歌词鉴赏」。',`<button class="primary" data-view="library">选择本地音乐${icon('arrow')}</button>`);return;}
+  $('#studyFurigana').checked=state.studyFurigana;$('#studyTranslation').checked=state.studyTranslation;
+  $('#studyFontSize').value=String(state.studyFont);$('#studyPaper').style.setProperty('--study-font',`${state.studyFont}px`);
+  $('#studySongTitle').textContent=$('#playerTitle').textContent;$('#studyArtist').textContent=$('#playerArtist').textContent;
+  $('#studyStatus').textContent=$('#lyricsStatus').textContent;
+  $('#studyReadingNote').textContent=state.studyFurigana?(data.readingNote || '日语读音由本地词典生成，人名与特殊读法可能有误。'):'';
+  const original=(text,tokens)=>`<p class="study-original">${lyricOriginal(text,tokens,state.studyFurigana)}</p>`;
+  const translation=text=>state.studyTranslation && text?`<p class="study-translation">${esc(text)}</p>`:'';
+  let content=(data.lines || []).map(line=>line.text || line.translation?`<div class="study-verse">${original(line.text,line.ruby)}${translation(line.translation)}</div>`:'<div class="study-gap" aria-hidden="true"></div>').join('');
+  if(!data.lines?.length && data.plain)content=original(data.plain,data.plainRuby);
+  if(data.translationPlain && state.studyTranslation)content+=`<section class="study-unmatched"><h3>${data.lines?.length?'无时间轴的译文':'译文'}</h3>${translation(data.translationPlain)}</section>`;
+  $('#studyLines').innerHTML=content || '<p class="study-no-lyrics">暂无歌词。可返回播放歌词面板，在线查找或导入原文与译文。</p>';
+  const originalText=studyText('original'),translatedText=studyText('translation');
+  $$('[data-study-copy]').forEach(button=>button.disabled=button.dataset.studyCopy==='original'?!originalText:button.dataset.studyCopy==='translation'?!translatedText:!originalText&&!translatedText);
+  window.scrollTo({top:scroll,behavior:'instant'});
+  if(readings && state.studyFurigana)loadReadings(data);
+}
+function studyText(kind) {
+  const data=state.lyricData || {},lines=data.lines || [];
+  if(kind==='original')return (lines.length?lines.map(line=>line.text).join('\n'):data.plain || '').trim();
+  if(kind==='translation')return [lines.map(line=>line.translation || '').join('\n'),data.translationPlain || ''].filter(text=>text.trim()).join('\n\n').trim();
+  return [lines.length?lines.map(line=>[line.text,line.translation].filter(Boolean).join('\n')).join('\n\n'):data.plain || '',data.translationPlain || ''].filter(text=>text.trim()).join('\n\n').trim();
+}
+async function copyStudy(kind) {
+  const text=studyText(kind);
+  if(!text)return toast('暂无可复制的歌词');
+  try {await navigator.clipboard.writeText(text);toast(`已复制${{original:'原文',translation:'译文',bilingual:'双语歌词'}[kind]}，不含读音与时间戳`);}
+  catch {$('#studyCopyText').value=text;$('#studyCopyDialog').showModal();$('#studyCopyText').focus();$('#studyCopyText').select();}
+}
+$('#openStudy').addEventListener('click',()=>openStudy());
+$('#studyReturn').addEventListener('click',()=>{setView(state.studyReturnView);setLyricsVisible(Boolean(state.playingFile));});
+$('#studyFocus').addEventListener('click',()=>setStudyFocus(!document.body.classList.contains('study-immersive')));
+$('#studyTranslation').addEventListener('change',()=>{state.studyTranslation=$('#studyTranslation').checked;writeStorage('musicdl.studyTranslation',state.studyTranslation);renderStudy(true);});
+$('#studyFurigana').addEventListener('change',()=>{state.studyFurigana=$('#studyFurigana').checked;writeStorage('musicdl.studyFurigana',state.studyFurigana);renderStudy(true,false);if(state.studyFurigana && state.lyricData)loadReadings(state.lyricData,true);});
+$('#studyFontSize').addEventListener('change',()=>{state.studyFont=Number($('#studyFontSize').value);writeStorage('musicdl.studyFont',state.studyFont);$('#studyPaper').style.setProperty('--study-font',`${state.studyFont}px`);});
+$('#studySelectCopy').addEventListener('click',()=>{$('#studyCopyText').focus();$('#studyCopyText').select();});
+document.addEventListener('selectionchange',()=>{if(state.studyPending && !studySelected())renderStudy();});
+$('#studyLines').addEventListener('keydown',event=>{if((event.ctrlKey || event.metaKey) && event.key.toLowerCase()==='a'){event.preventDefault();const range=document.createRange();range.selectNodeContents($('#studyLines'));const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);}});
+$('#studyLines').addEventListener('copy',event=>{
+  if(!studySelected() || !event.clipboardData)return;
+  const fragment=window.getSelection().getRangeAt(0).cloneContents();
+  fragment.querySelectorAll('rt,rp').forEach(node=>node.remove());
+  fragment.querySelectorAll('br').forEach(node=>node.replaceWith(document.createTextNode('\n')));
+  fragment.querySelectorAll('p,h3').forEach(node=>node.after(document.createTextNode('\n')));
+  event.clipboardData.setData('text/plain',fragment.textContent.trim());event.preventDefault();
+});
 
 async function openMoegirl(title,artist='',direct=true) {
   const request=++state.wikiRequest;
@@ -565,6 +644,8 @@ document.addEventListener('click',event=>{
   if(button.dataset.favorite) toggleFavorite(state.songs.find(s=>s.id===button.dataset.favorite));
   if(button.dataset.removeFavorite!==undefined) toggleFavorite(state.favorites[Number(button.dataset.removeFavorite)]);
   if(button.dataset.play) play(button.dataset.play);
+  if(button.dataset.study)openStudy(button.dataset.study);
+  if(button.dataset.studyCopy)copyStudy(button.dataset.studyCopy);
   if(button.hasAttribute('data-close-dialog')) button.closest('dialog').close();
   if(button.id==='focusSearch') { $('#searchInput').focus(); $('#searchInput').scrollIntoView({behavior:'smooth',block:'center'}); }
 });
@@ -603,7 +684,7 @@ $('#menuButton').setAttribute('aria-controls','sidebar');
 $('#menuButton').addEventListener('click',()=>setSidebar(!$('#sidebar').classList.contains('open')));
 document.addEventListener('click',e=>{if($('#sidebar').classList.contains('open')&&!e.target.closest('#sidebar,#menuButton'))setSidebar(false);});
 window.addEventListener('resize',()=>setSidebar($('#sidebar').classList.contains('open')));
-$('#closePlayer').addEventListener('click',()=>{savePlayback(true);++state.lyricRequest;++state.playSerial;state.pendingResume=null;state.playingFile=null;state.playback.lastFile=null;writeStorage('musicdl.playback',state.playback);$('#lyricsSearchDialog').close();setLyricsVisible(false);$('#audioPlayer').pause(); $('#audioPlayer').removeAttribute('src');$('#audioPlayer').load();$('#player').hidden=true;document.body.classList.remove('playing'); });
+$('#closePlayer').addEventListener('click',()=>{savePlayback(true);++state.lyricRequest;++state.playSerial;state.pendingResume=null;state.playingFile=null;state.lyricData=null;state.playback.lastFile=null;writeStorage('musicdl.playback',state.playback);$('#lyricsSearchDialog').close();setLyricsVisible(false);$('#audioPlayer').pause(); $('#audioPlayer').removeAttribute('src');$('#audioPlayer').load();$('#player').hidden=true;document.body.classList.remove('playing');setStudyFocus(false);renderStudy(true); });
 $('#audioPlayer').addEventListener('error',()=>{if($('#audioPlayer').hasAttribute('src'))toast('无法播放此文件，请保存后使用本地播放器试听',true);});
 document.addEventListener('keydown',e=>{ if(e.key==='/'&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.target.closest('input,textarea,select,dialog')){e.preventDefault();setView('discover');$('#searchInput').focus();} if(e.key==='Escape')setSidebar(false); });
 

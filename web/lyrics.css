@@ -68,3 +68,34 @@
 .wiki-candidate svg{width:15px;height:15px;flex-shrink:0}
 #moegirlResults{max-height:350px;overflow:auto}
 @media(max-width:680px){.history-heading{flex-wrap:wrap;gap:7px}.history-heading>span{min-width:115px}.search-history{padding:13px}.reading-toolbar{padding:9px 17px;align-items:flex-start}.reading-toolbar>span{font-size:9px}.player-info>#playerResume{font-size:8px}.song-title{text-align:left}}
+.study-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:16px;padding:17px 20px;margin:24px 0;background:#fff;border:1px solid var(--line);border-radius:12px}
+.study-options,.study-copy{display:flex;align-items:center;flex-wrap:wrap;gap:13px}
+.study-options label{display:flex;align-items:center;gap:5px;font-size:11px;color:#78628d}
+.study-options input{accent-color:var(--purple)}
+.study-options select{border:1px solid #e7deef;border-radius:6px;padding:6px;color:#77618f;background:#fff;font-size:11px}
+.study-copy{margin-left:auto;gap:8px}.study-copy .secondary{font-size:10px;padding:9px 12px}
+#studyFocus{font-size:11px;color:var(--purple)}
+.study-paper{--study-font:19px;width:100%;max-width:860px;margin:0 auto 40px;background:#fff;border:1px solid #e9e3f1;border-radius:17px;padding:40px 48px;box-shadow:0 8px 35px #69508008}
+.study-heading{border-bottom:1px solid #eee7f4;padding-bottom:23px;margin-bottom:28px}
+.study-heading h2{font-size:28px;line-height:1.5;margin:12px 0 8px;overflow-wrap:anywhere;color:#4a3b5b;user-select:text;-webkit-user-select:text}
+.study-heading p{font-size:12px;color:#9a8aa9;line-height:1.8;margin:6px 0}
+#studyReadingNote{font-size:10px;color:#ac98ba;min-height:18px}
+.study-lines{cursor:text;user-select:text;-webkit-user-select:text;overflow-wrap:anywhere}
+.study-lines ::selection{background:#e6dafa;color:#493361}
+.study-verse{padding:13px 0 18px}
+.study-original{font-size:var(--study-font);line-height:2.05;font-weight:500;white-space:pre-wrap;margin:0;color:#51425f}
+.study-original:has(ruby){line-height:2.55}
+.study-original ruby{ruby-position:over;ruby-align:center}
+.study-original rt{font-size:.52em;font-weight:400;color:#a38ab8;user-select:none;-webkit-user-select:none}
+.study-translation{font-size:calc(var(--study-font) - 4px);line-height:1.95;color:#9b87ab;white-space:pre-wrap;margin:6px 0 0}
+.study-gap{height:18px}.study-no-lyrics{font-size:13px;color:#a18caf;line-height:2}
+.study-unmatched{margin-top:30px;padding-top:20px;border-top:1px solid var(--line)}
+.study-unmatched h3{font-size:12px;font-weight:500;color:#a18caf}
+.study-footnote{border-top:1px solid #eee7f4;padding-top:20px;margin-top:30px;font-size:10px;line-height:1.8;color:#b4a5bf}
+#studyCopyText{display:block;width:100%;height:300px;resize:vertical;border:1px solid #e7deef;border-radius:8px;padding:14px;color:#665174;font:14px/1.9 'Microsoft YaHei',sans-serif}
+body.study-immersive .sidebar,body.study-immersive .topbar,body.study-immersive footer{display:none}
+body.study-immersive .workspace{margin-left:0}
+body.study-immersive main{max-width:1080px;padding-top:30px}
+body.study-immersive .player{left:24px;right:24px;max-width:1032px;margin:0 auto}
+body.study-immersive #studyView>.page-description{display:none}
+@media(max-width:680px){.study-toolbar{padding:14px;gap:14px}.study-options{gap:10px}.study-copy{width:100%;margin-left:0}.study-copy button{flex:1}.study-paper{padding:25px 23px;border-radius:13px}.study-heading h2{font-size:24px}.study-original{font-size:calc(var(--study-font) - 1px)}.study-translation{font-size:calc(var(--study-font) - 4px)}#studyReturn{font-size:10px;padding:10px}.study-verse{padding:13px 0 16px}body.study-immersive main{padding-top:24px}body.study-immersive .player{left:12px;right:12px}}

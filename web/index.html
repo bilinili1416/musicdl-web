@@ -14,6 +14,7 @@
 <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 15v5h16v-5"/></symbol>
 <symbol id="i-heart" viewBox="0 0 24 24"><path d="M20.5 4.8a5.3 5.3 0 0 0-7.5 0L12 6l-1-1.2A5.3 5.3 0 0 0 3.5 12L12 21l8.5-9a5.3 5.3 0 0 0 0-7.2Z"/></symbol>
 <symbol id="i-library" viewBox="0 0 24 24"><rect x="3" y="4" width="4" height="16" rx="1"/><rect x="10" y="4" width="4" height="16" rx="1"/><path d="m17 4 4 15-4 1-4-15"/></symbol>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M12 5v16M12 5C9 3 5 3 2 4v15c3-1 7-1 10 2 3-3 7-3 10-2V4c-3-1-7-1-10 1Z"/></symbol>
 <symbol id="i-settings" viewBox="0 0 24 24"><path d="m9 3-1 3-3 1-2 4 2 2v4l4 2 3-1 3 1 4-2v-4l2-2-2-4-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></symbol>
 <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
 <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 3h7v7m0-7L10 14M10 4H4v16h16v-6"/></symbol>
@@ -35,6 +36,7 @@
       <button class="nav-item" data-view="downloads"><svg><use href="#i-download"/></svg>下载管理<span class="nav-count" id="downloadCount">0</span></button>
       <button class="nav-item" data-view="favorites"><svg><use href="#i-heart"/></svg>我的收藏<span class="nav-count" id="favoriteCount">0</span></button>
       <button class="nav-item" data-view="library"><svg><use href="#i-library"/></svg>本地音乐</button>
+      <button class="nav-item" data-view="study"><svg><use href="#i-book"/></svg>歌词鉴赏</button>
     </nav>
     <div class="sidebar-separator"></div><div class="nav-caption">偏好与帮助</div>
     <button class="nav-item" id="settingsButton"><svg><use href="#i-settings"/></svg>设置</button>
@@ -75,13 +77,28 @@
       <section id="downloadsView" class="view" hidden><div class="page-heading"><div><span class="eyebrow">KEEP THE GOOD SOUNDS</span><h1>下载管理<span class="heading-dot">.</span></h1></div><button class="secondary" id="refreshDownloads"><svg><use href="#i-refresh"/></svg>刷新</button></div><p class="page-description">下载在后台进行，完成后可以保存到浏览器或在本地音乐中试听。</p><div class="stats-grid" id="downloadStats"></div><div class="tab-row" id="downloadTabs"><button class="active" data-status="all">全部任务</button><button data-status="active">进行中</button><button data-status="completed">已完成</button><button data-status="failed">失败</button></div><div id="downloadList"></div></section>
       <section id="favoritesView" class="view" hidden><div class="page-heading"><div><span class="eyebrow">YOUR PERSONAL COLLECTION</span><h1>我的收藏<span class="heading-dot">.</span></h1></div><span class="heading-note">给心动的音乐，留一个位置</span></div><p class="page-description">收藏保存在当前浏览器。再次下载时，重新搜索即可获取最新链接。</p><div id="favoritesList"></div></section>
       <section id="libraryView" class="view" hidden><div class="page-heading"><div><span class="eyebrow">ALWAYS WITH YOU</span><h1>本地音乐<span class="heading-dot">.</span></h1></div><button class="secondary" id="refreshLibrary"><svg><use href="#i-refresh"/></svg>刷新音乐库</button></div><p class="page-description">你的下载目录里的音乐。点击播放，享受收藏的声音。</p><div id="libraryList"></div></section>
+      <section id="studyView" class="view" hidden>
+        <div class="page-heading"><div><span class="eyebrow">TAKE YOUR TIME WITH THE WORDS</span><h1>歌词鉴赏<span class="heading-dot">.</span></h1></div><button class="secondary" id="studyReturn">返回播放歌词</button></div>
+        <p class="page-description">静静读一遍，听懂每一句。歌词保持静止，可自由选中与复制。</p>
+        <div class="study-toolbar" id="studyToolbar" hidden>
+          <div class="study-options"><label><input type="checkbox" id="studyFurigana"> 振假名</label><label><input type="checkbox" id="studyTranslation"> 显示译文</label><label for="studyFontSize">字号</label><select id="studyFontSize" aria-label="鉴赏字号"><option value="16">适中</option><option value="19">舒适</option><option value="22">大字</option></select></div>
+          <button class="text-button" id="studyFocus" aria-pressed="false">沉浸阅读</button>
+          <div class="study-copy"><button class="secondary" data-study-copy="original">复制原文</button><button class="secondary" data-study-copy="translation">复制译文</button><button class="secondary" data-study-copy="bilingual">复制双语</button></div>
+        </div>
+        <div id="studyEmpty"></div>
+        <article class="study-paper" id="studyPaper" hidden>
+          <header class="study-heading"><span class="eyebrow">LYRICS, AT YOUR OWN PACE</span><h2 id="studySongTitle"></h2><p id="studyArtist"></p><p id="studyStatus"></p><p id="studyReadingNote"></p></header>
+          <div class="study-lines" id="studyLines" tabindex="0" aria-label="可选中和复制的歌词原文与译文"></div>
+          <p class="study-footnote">拖动选中歌词，或在歌词区域按 Ctrl / ⌘ + A 全选；复制内容不含振假名和时间戳。</p>
+        </article>
+      </section>
       <footer><span>为热爱音乐的你而造 <span class="footer-heart">♡</span></span><span>请尊重版权，仅下载你有权使用的内容。</span></footer>
     </main>
   </div>
 </div>
 <section class="lyrics-panel" id="lyricsPanel" aria-label="逐句歌词" hidden>
   <div class="lyrics-heading"><div><span class="eyebrow">WORDS IN THE MUSIC</span><h2><button id="lyricsTitle" class="song-title" type="button" title="在萌娘百科查询此歌曲">逐句歌词</button></h2><p id="lyricsArtist"></p></div><button class="icon-button" id="hideLyrics" aria-label="收起歌词"><svg><use href="#i-close"/></svg></button></div>
-  <div class="lyrics-toolbar"><span id="lyricsStatus" role="status">正在读取歌词…</span><button class="text-button" id="lookupLyrics">在线找歌词</button><button class="text-button" id="importOriginal">导入原文</button><button class="text-button" id="importTranslation">导入译文</button></div>
+  <div class="lyrics-toolbar"><span id="lyricsStatus" role="status">正在读取歌词…</span><button class="text-button" id="openStudy">歌词鉴赏</button><button class="text-button" id="lookupLyrics">在线找歌词</button><button class="text-button" id="importOriginal">导入原文</button><button class="text-button" id="importTranslation">导入译文</button></div>
   <div class="reading-toolbar"><label><input type="checkbox" id="furiganaToggle"> 日语振假名</label><span id="readingStatus" role="status">汉字上方显示读音</span></div>
   <div class="lyrics-scroll" id="lyricsScroll" tabindex="0" aria-label="歌词列表，点击带时间的歌词可跳转"><div id="lyricsLines"></div></div>
   <div class="lyrics-footer"><label for="lyricsOffset">歌词偏移</label><input id="lyricsOffset" type="number" min="-30" max="30" step="0.5" value="0" aria-label="歌词偏移秒数"><span>秒 · 正值让歌词提前</span><button class="text-button" id="followLyrics">跟随当前句</button></div>
@@ -91,6 +108,7 @@
 <dialog id="moegirlDialog"><div class="dialog-heading"><div><span class="eyebrow">BEHIND THE SONG</span><h2>萌娘百科 · 歌曲词条</h2></div><button class="icon-button" data-close-dialog aria-label="关闭词条查询"><svg><use href="#i-close"/></svg></button></div><p class="field-hint">日文别名会解析到对应词条。遇到同名或没有精确匹配时，请选择正确版本。</p><form id="moegirlForm" class="lyrics-search-form"><input id="moegirlQuery" maxlength="200" required aria-label="萌娘百科歌曲名" placeholder="日文或中文歌名"><button class="primary" type="submit">查询</button></form><div id="moegirlResults" role="status"></div></dialog>
 <dialog id="lyricsSearchDialog"><div class="dialog-heading"><div><span class="eyebrow">FIND THE RIGHT VERSION</span><h2>选择歌词版本</h2></div><button class="icon-button" data-close-dialog aria-label="关闭歌词搜索"><svg><use href="#i-close"/></svg></button></div><p class="field-hint">选择同一歌手与版本，避免原唱、翻唱的时间轴不同。平台没有译文时，可以导入翻译 LRC。</p><form id="lyricsSearchForm" class="lyrics-search-form"><input id="lyricsQuery" aria-label="歌词搜索关键词" maxlength="100" placeholder="歌名 + 歌手" required><button class="primary" type="submit">搜索</button></form><div id="lyricsCandidates" role="status"></div></dialog>
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+<dialog id="studyCopyDialog"><div class="dialog-heading"><h2>复制歌词</h2><button class="icon-button" data-close-dialog aria-label="关闭复制歌词"><svg><use href="#i-close"/></svg></button></div><p class="field-hint">浏览器暂时无法自动写入剪贴板，请选中文本后按 Ctrl / ⌘ + C，或使用手机的复制菜单。</p><textarea id="studyCopyText" readonly aria-label="可复制的歌词文本"></textarea><div class="dialog-actions"><button class="primary" id="studySelectCopy">选中全部</button></div></dialog>
 <dialog id="settingsDialog"><div class="dialog-heading"><div><span class="eyebrow">MAKE IT YOURS</span><h2>工作台设置</h2></div><button class="icon-button" data-close-dialog aria-label="关闭设置"><svg><use href="#i-close"/></svg></button></div><form id="settingsForm"><label class="field-label" for="resultLimit">每个平台的搜索结果数</label><select id="resultLimit"><option value="5">5 首 · 更快搜索</option><option value="12">12 首 · 推荐</option><option value="20">20 首</option><option value="30">30 首</option></select><p class="field-hint">搜索结果已经包含平台可提供的音质，无损格式可在结果中筛选。</p><label class="field-label">下载保存目录</label><code class="output-path" id="outputPath"></code><p class="field-hint">音频和可用歌词保存在此目录，按平台分类。收藏与偏好保存在当前浏览器。</p><div class="dialog-actions"><button class="secondary" type="button" data-close-dialog>取消</button><button class="primary" type="submit">保存设置<svg><use href="#i-check"/></svg></button></div></form></dialog>
 <dialog id="helpDialog"><div class="dialog-heading"><div><span class="eyebrow">A SIMPLE START</span><h2>收藏音乐，只需三步</h2></div><button class="icon-button" data-close-dialog aria-label="关闭指南"><svg><use href="#i-close"/></svg></button></div><div class="help-step"><span>01</span><div><h3>找到喜欢的声音</h3><p>选择音乐平台，输入歌名、歌手或专辑。多个平台可以一起搜索。</p></div></div><div class="help-step"><span>02</span><div><h3>选择并下载</h3><p>点击下载按钮，或勾选多首歌曲批量下载。真实任务状态会显示在下载管理中。</p></div></div><div class="help-step"><span>03</span><div><h3>让音乐留在身边</h3><p>下载完成后，在本地音乐中试听，或点击保存文件。浏览器对 FLAC、APE 等格式的播放支持可能不同。</p></div></div><div class="help-note">平台可能因网络、接口变化或访问限制暂不可用。尝试切换来源或稍后重试。</div><a class="repo-link" href="https://github.com/CharlesPikachu/musicdl" target="_blank" rel="noreferrer">查看 musicdl 原仓库<svg><use href="#i-external"/></svg></a></dialog>
 </body>
