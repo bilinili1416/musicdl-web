@@ -3,6 +3,7 @@
 !requirements.txt
 !server.py
 !lyrics.py
+!songtools.py
 !web/
 !web/**
 !deploy/

@@ -2,10 +2,11 @@ $ErrorActionPreference = 'Stop'
 $musicdlSourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $musicdlArchivePath = Join-Path $musicdlSourceRoot 'deploy-source.zip'
 $musicdlSourceFiles = @(
-    'server.py', 'lyrics.py', 'requirements.txt', 'Dockerfile', '.dockerignore',
+    'server.py', 'lyrics.py', 'songtools.py', 'requirements.txt', 'Dockerfile', '.dockerignore',
     '.env.example', '.gitignore', '.gitattributes',
-    'web/index.html', 'web/styles.css', 'web/lyrics.css', 'web/app.js', 'web/favicon.svg',
-    'deploy/entrypoint.sh', 'deploy/package.ps1', 'tests/test_server.py',
+    'web/index.html', 'web/styles.css', 'web/lyrics.css', 'web/app.js', 'web/memory.js', 'web/favicon.svg',
+    'deploy/entrypoint.sh', 'deploy/package.ps1', 'start.ps1',
+    'tests/test_server.py', 'tests/test_songtools.py', 'tests/test_memory.cjs',
     'README.md', 'DEPLOY.md'
 )
 Add-Type -AssemblyName System.IO.Compression

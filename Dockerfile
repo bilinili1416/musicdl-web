@@ -13,7 +13,7 @@ RUN apt-get update \
     && useradd --uid 10001 --create-home musicdl
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
-COPY server.py lyrics.py ./
+COPY server.py lyrics.py songtools.py ./
 COPY web/ ./web/
 COPY deploy/entrypoint.sh /usr/local/bin/musicdl-entrypoint
 RUN chmod +x /usr/local/bin/musicdl-entrypoint

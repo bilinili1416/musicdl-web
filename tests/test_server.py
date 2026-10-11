@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import server
 import lyrics
+import songtools
 
 
 def synthetic_song():
@@ -78,7 +79,7 @@ class WebIntegrationTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(json.loads(body)["ready"])
         self.assertEqual(len(json.loads(body)["sources"]), 6)
-        for path in ["/", "/styles.css", "/lyrics.css", "/app.js", "/favicon.svg"]:
+        for path in ["/", "/styles.css", "/lyrics.css", "/app.js", "/memory.js", "/favicon.svg"]:
             self.assertEqual(self.request(path)[0], 200)
         self.assertEqual(self.request("/server.py")[0], 404)
         self.assertEqual(self.request("/../server.py")[0], 404)
@@ -245,6 +246,31 @@ class WebIntegrationTests(unittest.TestCase):
             code, _, data = self.request(f"/api/lyrics/{fid}/lookup", {"keyword": "Test"})
             self.assertEqual(json.loads(data)["candidates"], choices)
         self.assertIsNone(lyrics.exact_candidate({"title": "Test", "artist": "Unmatched"}, choices))
+
+    def test_reading_endpoint_preserves_timing_and_uses_local_dictionary(self):
+        audio = self.output / "reading-fixture.wav"
+        audio.write_bytes(synthetic_song().downloaded_contents)
+        audio.with_suffix(".lrc").write_text("[00:01.20]青い空\n[00:04]君の笑顔", encoding="utf-8")
+        fid = server.file_id(audio)
+        code, _, data = self.request(f"/api/lyrics/{fid}/furigana")
+        self.assertEqual(code, 200)
+        parsed = json.loads(data)
+        self.assertEqual(parsed["lines"][0]["time"], 1.2)
+        self.assertIn({"text": "君", "reading": "きみ"}, parsed["lines"][1]["ruby"])
+        self.assertEqual(self.request("/api/lyrics/../furigana")[0], 404)
+        with patch.object(server, "AUTH_PASSWORD", "test-password"):
+            self.assertEqual(self.request(f"/api/lyrics/{fid}/furigana")[0], 401)
+
+    def test_article_lookup_validates_input_and_requires_existing_auth(self):
+        for body in ({"title": ""}, {"title": "a|b"}, {"title": []}, {"title": "test", "artist": []}):
+            self.assertEqual(self.request("/api/moegirl", body)[0], 400)
+        with patch.object(songtools, "moegirl", return_value={"status": "matched", "article": {"title": "苍蓝所栖"}}) as lookup:
+            code, _, data = self.request("/api/moegirl", {"title": " 青のすみか ", "artist": "Singer"})
+            self.assertEqual(code, 200)
+            lookup.assert_called_once_with("青のすみか", "Singer")
+            self.assertEqual(json.loads(data)["article"]["title"], "苍蓝所栖")
+        with patch.object(server, "AUTH_PASSWORD", "test-password"):
+            self.assertEqual(self.request("/api/moegirl", {"title": "青のすみか"})[0], 401)
 
 
 class LyricParsingTests(unittest.TestCase):

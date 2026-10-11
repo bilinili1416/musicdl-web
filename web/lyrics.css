@@ -39,3 +39,32 @@
 @media(max-width:1150px){.lyrics-panel{right:28px;width:min(580px,calc(100vw - 256px))}}
 @media(max-width:680px){.lyrics-panel{left:12px;right:12px;bottom:155px;width:auto;max-height:calc(100dvh - 185px);border-radius:16px}.lyrics-heading{padding:19px 18px 13px}.lyrics-heading h2{font-size:17px;max-height:75px;overflow:auto}.lyrics-toolbar{padding:10px 17px;gap:12px}.lyrics-toolbar>span{flex-basis:100%}.lyrics-scroll{height:290px}#lyricsLines{padding:55px 14px 100px}.lyric-original{font-size:16px}.lyric-line.active .lyric-original{font-size:18px}.lyric-translation{font-size:12px}.lyrics-footer{padding:10px 15px;font-size:9px}.player #toggleLyrics{position:absolute;right:43px;top:15px}.player-info{padding-right:50px}.lyrics-footer button{font-size:9px}}
 @media(prefers-reduced-motion:reduce){.lyric-line{transition:none}}
+.search-history{margin:24px 0 8px;padding:16px 18px;border:1px solid var(--line);border-radius:14px;background:#fcfaff}
+.history-heading{display:flex;align-items:center;gap:12px;font-size:12px;color:#79648f;margin-bottom:12px}
+.history-heading>span{font-size:10px;color:#a192b0;flex:1}
+.history-heading .text-button{font-size:11px}
+.history-items{display:flex;flex-wrap:wrap;gap:8px}
+.history-item{display:inline-flex;max-width:100%;align-items:center;border:1px solid #e8def4;border-radius:8px;background:white;overflow:hidden}
+.history-item>button:first-child{font-size:12px;padding:8px 10px;color:#79618f;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;text-align:left}
+.history-item>button:hover{background:#f0e9fc}
+.history-remove{display:flex;align-items:center;justify-content:center;width:29px;align-self:stretch;flex-shrink:0;color:#b7a8c8}
+.history-remove svg{width:13px;height:13px}
+.song-title{font:inherit;color:inherit;text-align:inherit;display:inline-flex;align-items:baseline;gap:6px;max-width:100%;min-width:0;vertical-align:bottom}
+.song-title:hover,.song-title:focus-visible{color:var(--purple);text-decoration:underline;text-underline-offset:4px}
+.song-title>strong{min-width:0}
+.song-title>span{font-size:10px;font-weight:400;color:#b7a4c8;flex-shrink:0}
+.track-text>.song-title{width:100%}
+.player-info>#playerTitle{display:block;font-size:12px;font-weight:700;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.player-info>#playerResume{font-size:9px;color:#9784ac;margin-top:3px;display:block;white-space:normal}
+.reading-toolbar{display:flex;align-items:center;gap:12px;padding:10px 25px;border-bottom:1px solid var(--line);background:#fcfaff}
+.reading-toolbar label{font-size:11px;color:#846697;white-space:nowrap;display:flex;align-items:center;gap:4px}
+.reading-toolbar input{accent-color:var(--purple)}
+.reading-toolbar>span{font-size:10px;line-height:1.6;color:#aa98b9}
+.lyric-original ruby,.lyric-plain ruby{ruby-position:over;ruby-align:center}
+.lyric-original rt,.lyric-plain rt{font-size:.55em;font-weight:400;color:inherit;line-height:1.2;user-select:none}
+.lyric-original:has(ruby){line-height:2.1}
+.wiki-candidate{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:15px 8px;border-bottom:1px solid var(--line);color:#7d5d98;font-size:13px;text-decoration:none;overflow-wrap:anywhere}
+.wiki-candidate:hover{background:#f5effc}
+.wiki-candidate svg{width:15px;height:15px;flex-shrink:0}
+#moegirlResults{max-height:350px;overflow:auto}
+@media(max-width:680px){.history-heading{flex-wrap:wrap;gap:7px}.history-heading>span{min-width:115px}.search-history{padding:13px}.reading-toolbar{padding:9px 17px;align-items:flex-start}.reading-toolbar>span{font-size:9px}.player-info>#playerResume{font-size:8px}.song-title{text-align:left}}

@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import lyrics
+import songtools
 
 ROOT = Path(__file__).resolve().parent
 DATA_ROOT = Path(os.environ.get("MUSICDL_DATA_DIR", str(ROOT))).resolve()
@@ -332,18 +333,27 @@ class Handler(BaseHTTPRequestHandler):
                 songs = library()
             return self.json_response({"songs": songs})
         if path.startswith("/api/lyrics/"):
-            fid = path.rsplit("/", 1)[-1]
+            match = re.fullmatch(r"/api/lyrics/([a-f0-9]{32})(/furigana)?", path)
+            if not match:
+                return self.json_response({"error": "无效的歌词请求"}, 404)
+            fid, readings = match.groups()
             file = find_file(fid)
             if not file:
                 return self.json_response({"error": "文件不存在"}, 404)
             raw = lyrics.load(file, fid, STATE)
-            return self.json_response(lyrics.align(**raw))
+            data = lyrics.align(**raw)
+            if readings:
+                try:
+                    data = songtools.annotate(data)
+                except ImportError:
+                    return self.json_response({"error": "请安装 requirements.txt 中的日语注音依赖"}, 503)
+            return self.json_response(data)
         if path.startswith("/api/files/"):
             file = find_file(path.rsplit("/", 1)[-1])
             if file:
                 return self.serve_file(file, attachment="download" in urlparse(self.path).query)
             return self.json_response({"error": "文件不存在"}, 404)
-        assets = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/styles.css": "styles.css", "/lyrics.css": "lyrics.css", "/favicon.svg": "favicon.svg"}
+        assets = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/memory.js": "memory.js", "/styles.css": "styles.css", "/lyrics.css": "lyrics.css", "/favicon.svg": "favicon.svg"}
         if path in assets:
             return self.serve_file(ROOT / "web" / assets[path])
         return self.json_response({"error": "页面不存在"}, 404)
@@ -401,6 +411,11 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError("无效请求")
             path = urlparse(self.path).path
+            if path == "/api/moegirl":
+                title, artist = body.get("title"), body.get("artist", "")
+                if not isinstance(title, str) or not 1 <= len(title.strip()) <= 200 or not isinstance(artist, str) or len(artist) > 200 or any(c in title for c in "|\r\n\x00"):
+                    raise ValueError("请输入 1–200 字的单首歌曲名称")
+                return self.json_response(songtools.moegirl(title.strip(), artist.strip()))
             if is_lyrics:
                 match = re.fullmatch(r"/api/lyrics/([a-f0-9]{32})/(import|lookup)", path)
                 if not match:
